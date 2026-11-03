@@ -1138,6 +1138,9 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
       completion = executor.recover(args.fetch(:command_id))
       later = arguments(action: "publish")
       later[:identity]["resource_id"] = args.dig(:identity, "resource_id")
+      later[:owner].merge!(
+        args.fetch(:owner).slice("mapping_id", "external_id")
+      )
       journal.prepare(**later)
       expect(
         journal.retained(args.fetch(:command_id)).dig("state", "completion")
@@ -1156,6 +1159,256 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
       expect { journal.retained(args.fetch(:command_id)) }.to raise_error(
         DiscussionBridgeGhost::Error
       )
+    end
+  end
+
+  it "hands temporary claims to permanent physical assignments atomically and keeps foreign connections from reusing a completed object" do
+    args = arguments
+    other = make_installation(@installation.native_target)
+    original = nil
+    with_journal do |journal, context|
+      _command, native = completed_response(journal, context, args)
+      stub_native_reads(args, native)
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: journal,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      executor.recover(args.fetch(:command_id))
+      expect(
+        @installation.operational_records.where(kind: "native_barrier").count
+      ).to eq(0)
+      assignments =
+        @installation.operational_records.where(kind: "native_assignment")
+      expect(assignments.pluck(:record_key).sort).to eq(
+        [
+          "native:#{native.fetch("id")}",
+          "resource:#{args.dig(:identity, "resource_id")}",
+          "slug:#{native.fetch("slug")}"
+        ].sort
+      )
+      original = journal.retained(args.fetch(:command_id))
+      expect {
+        journal.prepare(**args.merge(command_id: SecureRandom.uuid))
+      }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+    with_journal(other) do |journal, _context|
+      same_native = source_move_arguments("a" * 24)
+      expect { journal.prepare(**same_native) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      same_slug = arguments
+      expect { journal.prepare(**same_slug) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      independent = source_move_arguments("b" * 24)
+      journal.prepare(**independent)
+    end
+    with_journal do |journal, _context|
+      expect(journal.retained(args.fetch(:command_id))).to eq(original)
+    end
+  end
+
+  it "rolls back permanent assignment handoff together with completion and temporary release on a crash" do
+    args = arguments
+    with_journal do |journal, context|
+      _command, native = completed_response(journal, context, args)
+      stub_native_reads(args, native)
+      before = encrypted_snapshot
+      crash =
+        TracePoint.new(:call) do |event|
+          if event.self.equal?(journal) && event.method_id == :release_claims!
+            raise "SYNTHETIC assignment handoff crash"
+          end
+        end
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: journal,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      begin
+        crash.enable
+        expect { executor.recover(args.fetch(:command_id)) }.to raise_error(
+          RuntimeError,
+          /SYNTHETIC/
+        )
+      ensure
+        crash.disable
+      end
+      expect(encrypted_snapshot).to eq(before)
+      expect(
+        @installation
+          .operational_records
+          .where(kind: %w[native_assignment native_assignment_handoff])
+          .count
+      ).to eq(0)
+      expect(
+        journal.retained(args.fetch(:command_id)).dig("state", "completion")
+      ).to eq(nil)
+      executor.recover(args.fetch(:command_id))
+      expect(
+        @installation.operational_records.where(kind: "native_assignment").count
+      ).to eq(3)
+      expect(
+        @installation.operational_records.where(kind: "native_barrier").count
+      ).to eq(0)
+    end
+    expect(
+      a_request(
+        :post,
+        @installation.native_target.admin_origin + args.dig(:request, "path")
+      )
+    ).to have_been_made.once
+  end
+
+  it "qualifies a completed legacy physical assignment from original history even when its installation is disabled" do
+    args = arguments
+    other = make_installation(@installation.native_target)
+    original = nil
+    with_journal do |journal, context|
+      _command, native = completed_response(journal, context, args)
+      stub_native_reads(args, native)
+      DiscussionBridgeGhost::NativeExecutor.new(
+        context: context,
+        journal: journal,
+        api_key: "a" * 24 + ":" + "12" * 32
+      ).recover(args.fetch(:command_id))
+      @installation
+        .operational_records
+        .where(
+          kind: %w[
+            native_assignment
+            native_assignment_handoff
+            native_assignment_enrollment
+          ]
+        )
+        .delete_all
+      row("native_command", args.fetch(:command_id)).update_columns(
+        native_assignment_version: nil
+      )
+      original = retained_history_snapshot
+    end
+    @installation.update!(enabled: false)
+    WebMock.reset!
+    with_journal(other) do |journal, _context|
+      expect(
+        row("native_command", args.fetch(:command_id)).native_assignment_version
+      ).to eq(1)
+      expect(
+        @installation.operational_records.where(kind: "native_assignment").count
+      ).to eq(3)
+      expect {
+        journal.prepare(**source_move_arguments("a" * 24))
+      }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+    retained =
+      retained_history_snapshot.reject do |_id, kind, _key, _payload|
+        %w[
+          native_assignment
+          native_assignment_handoff
+          native_assignment_enrollment
+        ].include?(kind)
+      end
+    expect(retained).to eq(original)
+    expect(a_request(:any, /ghost-native-/)).not_to have_been_made
+  end
+
+  it "does not repair a qualified assignment whose handoff or claim is missing and detects the protected version enrollment" do
+    args = arguments
+    with_journal do |journal, context|
+      _command, native = completed_response(journal, context, args)
+      stub_native_reads(args, native)
+      DiscussionBridgeGhost::NativeExecutor.new(
+        context: context,
+        journal: journal,
+        api_key: "a" * 24 + ":" + "12" * 32
+      ).recover(args.fetch(:command_id))
+      saved = row("native_assignment_handoff", args.fetch(:command_id))
+      payload = saved.encrypted_payload
+      saved.delete
+      expect { journal.retained(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect {
+        journal.qualify_retained_assignment!(args.fetch(:command_id))
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      @installation.operational_records.create!(
+        kind: "native_assignment_handoff",
+        record_key: args.fetch(:command_id),
+        encrypted_payload: payload
+      )
+      expect(
+        journal.retained(args.fetch(:command_id)).dig("state", "completion")
+      ).not_to eq(nil)
+      row("native_assignment", "native:#{native.fetch("id")}").delete
+      expect { journal.retained(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+    end
+  end
+
+  it "does not create a permanent assignment for a merely pending or retired intent" do
+    args = arguments
+    with_journal do |journal, _context|
+      journal.prepare(**args)
+      row("native_command", args.fetch(:command_id)).update_columns(
+        native_assignment_version: nil
+      )
+      journal.qualify_retained_assignment!(args.fetch(:command_id))
+      expect(
+        @installation.operational_records.where(kind: "native_assignment").count
+      ).to eq(0)
+      journal.retire_unsent!(args.fetch(:command_id))
+      expect(
+        @installation
+          .operational_records
+          .where(kind: "native_assignment_handoff")
+          .count
+      ).to eq(0)
+      row("native_assignment_enrollment", args.fetch(:command_id)).delete
+      expect { journal.retained(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+    end
+  end
+
+  it "keeps a native ID exclusive across kinds while allowing many distinct resources on one target" do
+    args = arguments
+    with_journal do |journal, context|
+      _command, native = completed_response(journal, context, args)
+      stub_native_reads(args, native)
+      DiscussionBridgeGhost::NativeExecutor.new(
+        context: context,
+        journal: journal,
+        api_key: "a" * 24 + ":" + "12" * 32
+      ).recover(args.fetch(:command_id))
+      page = arguments(action: "publish")
+      page[:identity]["kind"] = "page"
+      page[:request]["path"] = "/ghost/api/admin/pages/#{native.fetch("id")}/"
+      page[:request]["body_bytes"] = JSON.generate(
+        "pages" => [page.fetch(:candidate)]
+      )
+      expect { journal.prepare(**page) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      independent = arguments(action: "publish")
+      independent[:identity]["native_id"] = "b" * 24
+      independent[:baseline].merge!(
+        "id" => "b" * 24,
+        "slug" => "second-article"
+      )
+      independent[:candidate].merge!(
+        "id" => "b" * 24,
+        "slug" => "second-article"
+      )
+      independent[:request].merge!(
+        "path" => "/ghost/api/admin/posts/#{"b" * 24}/",
+        "body_bytes" =>
+          JSON.generate("posts" => [independent.fetch(:candidate)])
+      )
+      journal.prepare(**independent)
     end
   end
 

@@ -95,7 +95,10 @@ module DiscussionBridgeGhost
           )
           .freeze
       @attempt_http = {}
-      qualify_target_legacy! if @effect_context
+      if @effect_context
+        qualify_target_legacy!
+        qualify_target_assignments!
+      end
     end
 
     # Retain exact bytes, complete baseline/candidate and original directional
@@ -137,12 +140,18 @@ module DiscussionBridgeGhost
         end
         assert_claims_clear!(command.fetch("claims"))
         assert_target_clear!
+        assert_assignment_clear!(command)
         create_record("native_command", command_id, command)
         create_record("native_progress", command_id, initial_state(command))
         create_record(
           "native_exclusion_enrollment",
           command_id,
           enrollment_for(command)
+        )
+        create_record(
+          "native_assignment_enrollment",
+          command_id,
+          assignment_enrollment(command)
         )
         command
           .fetch("claims")
@@ -185,6 +194,7 @@ module DiscussionBridgeGhost
             raise Error.new("identity_conflict")
           end
           assert_target_clear!(except_command: command_id)
+          assert_assignment_clear!(command)
           identity = {
             "command_id" => command_id,
             "attempt_id" => SecureRandom.uuid,
@@ -342,9 +352,14 @@ module DiscussionBridgeGhost
           snapshot(
             value.merge("released_claims" => active_claims(command, state))
           )
+        # Physical identity survives a crash immediately after this commit.
+        # This is an atomic handoff, not a native ownership receipt, current
+        # receiver authority, public verification or acknowledgment.
+        handoff_assignment!(command, completion)
         append(command, state, "effect_completed", completion)
         release_claims!(command, completion.fetch("released_claims"))
         remove_create_guard!(command)
+        load_state(command_id)
         completion
       end
     end
@@ -362,7 +377,8 @@ module DiscussionBridgeGhost
         "native_id" => native_id
       }
       validate_identity!(identity)
-      assert_claims_clear!(identity_claims(identity, slugs))
+      claims = identity_claims(identity, slugs)
+      assert_claims_clear!(claims)
       true
     end
 
@@ -480,7 +496,239 @@ module DiscussionBridgeGhost
       end
     end
 
+    # Upgrade local physical-assignment projections only. Original commands,
+    # responses, terminal events and receipts are never replaced. An indexed
+    # NULL version is the explicit legacy case; a qualified-but-missing handoff
+    # is corruption, not permission to recreate it from markers or today's HTML.
+    def qualify_retained_assignment!(id)
+      @context.commit do
+        row = record("native_command", id)
+        raise Error.new("identity_conflict") unless row
+        if row.native_assignment_version == 1
+          load_state(id)
+          next
+        end
+        unless row.native_assignment_version.nil?
+          raise Error.new("identity_conflict")
+        end
+        command, state, = load_state(id)
+        if state["completion"]
+          handoff_assignment!(command, state.fetch("completion"))
+        end
+        enrollment = record("native_assignment_enrollment", id)
+        if enrollment
+          unless enrollment.private_payload == assignment_enrollment(command)
+            raise Error.new("identity_conflict")
+          end
+        else
+          create_record(
+            "native_assignment_enrollment",
+            id,
+            assignment_enrollment(command)
+          )
+        end
+        row.update!(native_assignment_version: 1)
+        load_state(id)
+      end
+    end
+
     private
+
+    def assignment_enrollment(command)
+      {
+        "format" => "ghost-native-assignment-enrollment-1",
+        "binding" => @binding,
+        "command_id" => command.fetch("command_id"),
+        "command_sha256" => Digest::SHA256.hexdigest(JSON.generate(command))
+      }
+    end
+
+    def assignment_owner(command, native_id)
+      {
+        "binding" => @binding,
+        "direction" => command.dig("owner", "direction"),
+        "mapping_id" => command.dig("owner", "mapping_id"),
+        "external_id" => command.dig("owner", "external_id"),
+        "resource_id" => command.dig("identity", "resource_id"),
+        "kind" => command.dig("identity", "kind"),
+        "native_id" => native_id
+      }
+    end
+
+    def assignment_for(command, completion)
+      native_id = completion.fetch("native_id")
+      unless native_id.is_a?(String) && /\A[a-f0-9]{24}\z/.match?(native_id)
+        raise Error.new("identity_conflict")
+      end
+      claims = (command.fetch("claims") + ["native:#{native_id}"]).uniq.sort
+      {
+        "format" => "ghost-native-assignment-1",
+        "binding" => @binding,
+        "command_id" => command.fetch("command_id"),
+        "command_sha256" => Digest::SHA256.hexdigest(JSON.generate(command)),
+        "completion_sha256" =>
+          Digest::SHA256.hexdigest(JSON.generate(completion)),
+        "owner" => assignment_owner(command, native_id),
+        "claims" => claims
+      }
+    end
+
+    def assignment_claim(value, claim)
+      {
+        "format" => "ghost-native-assignment-claim-1",
+        "owner" => value.fetch("owner"),
+        "command_id" => value.fetch("command_id"),
+        "assignment_sha256" => Digest::SHA256.hexdigest(JSON.generate(value)),
+        "claim" => claim
+      }
+    end
+
+    def checked_assignment_claim!(row)
+      value = row.private_payload
+      unless value.is_a?(Hash) &&
+               value.keys.sort ==
+                 %w[format owner command_id assignment_sha256 claim].sort &&
+               value["format"] == "ghost-native-assignment-claim-1" &&
+               value["claim"] == row.record_key
+        raise Error.new("identity_conflict")
+      end
+      original =
+        row
+          .installation
+          .operational_records
+          .find_by(
+            kind: "native_assignment_handoff",
+            record_key: value.fetch("command_id")
+          )
+          &.private_payload
+      unless original.is_a?(Hash) &&
+               original["owner"] == value.fetch("owner") &&
+               original["claims"].is_a?(Array) &&
+               original["claims"].include?(row.record_key) &&
+               assignment_claim(original, row.record_key) == value
+        raise Error.new("identity_conflict")
+      end
+      value
+    end
+
+    def assert_assignment_clear!(command)
+      expected = assignment_owner(command, command.dig("identity", "native_id"))
+      target_records("native_assignment")
+        .where(record_key: command.fetch("claims"))
+        .each do |row|
+          unless checked_assignment_claim!(row).fetch("owner") == expected
+            raise Error.new("identity_conflict")
+          end
+        end
+    end
+
+    # Called only in the same short transaction as the validated terminal
+    # effect. These permanent physical claims are not a normative ownership
+    # receipt and never grant current write/ACK authority. Retired slugs remain
+    # reserved; an actual URL move can add aliases for the SAME native owner.
+    def handoff_assignment!(command, completion)
+      value = snapshot(assignment_for(command, completion))
+      old = record("native_assignment_handoff", command.fetch("command_id"))
+      if old
+        raise Error.new("identity_conflict") unless old.private_payload == value
+      else
+        create_record(
+          "native_assignment_handoff",
+          command.fetch("command_id"),
+          value
+        )
+      end
+      value
+        .fetch("claims")
+        .each do |claim|
+          rows =
+            target_records("native_assignment").where(record_key: claim).to_a
+          raise Error.new("identity_conflict") if rows.length > 1
+          if rows.empty?
+            # Legacy qualification may encounter a different still-pending
+            # command. Never steal its temporary exclusion projection.
+            barriers = target_records("native_barrier").where(record_key: claim)
+            unless barriers.all? { |barrier|
+                     barrier.installation_id == @installation.id &&
+                       barrier.private_payload ==
+                         {
+                           "format" => "ghost-native-barrier-1",
+                           "binding" => @binding,
+                           "command_id" => command.fetch("command_id"),
+                           "claim" => claim
+                         }
+                   }
+              raise Error.new("identity_conflict")
+            end
+            create_record(
+              "native_assignment",
+              claim,
+              assignment_claim(value, claim)
+            )
+          elsif checked_assignment_claim!(rows.first).fetch("owner") !=
+                value.fetch("owner")
+            raise Error.new("identity_conflict")
+          end
+        end
+      value
+    end
+
+    def validate_assignment!(row, command, state)
+      return if row.native_assignment_version.nil?
+      unless row.native_assignment_version == 1 &&
+               record(
+                 "native_assignment_enrollment",
+                 row.record_key
+               )&.private_payload == assignment_enrollment(command)
+        raise Error.new("identity_conflict")
+      end
+      handoff = record("native_assignment_handoff", row.record_key)
+      if state["completion"]
+        expected = assignment_for(command, state.fetch("completion"))
+        unless handoff&.private_payload == expected
+          raise Error.new("identity_conflict")
+        end
+        expected
+          .fetch("claims")
+          .each do |claim|
+            claims =
+              target_records("native_assignment").where(record_key: claim).to_a
+            unless claims.length == 1 &&
+                     checked_assignment_claim!(claims.first).fetch("owner") ==
+                       expected.fetch("owner")
+              raise Error.new("identity_conflict")
+            end
+          end
+      elsif handoff
+        raise Error.new("identity_conflict")
+      end
+    end
+
+    def qualify_target_assignments!
+      scope =
+        target_records("native_command").where(native_assignment_version: nil)
+      scope
+        .limit(100)
+        .each do |row|
+          reader =
+            if row.installation_id == @installation.id
+              self
+            else
+              self.class.new(
+                context: @context,
+                now: @now,
+                history_installation: row.installation
+              )
+            end
+          reader.qualify_retained_assignment!(row.record_key)
+        end
+      if scope.exists? ||
+           target_records("native_command")
+             .where.not(native_assignment_version: 1)
+             .exists?
+        raise Error.new("native_exclusion_pending")
+      end
+    end
 
     def assert_effect_context!
       raise Error.new("identity_conflict") unless @effect_context
@@ -498,6 +746,12 @@ module DiscussionBridgeGhost
       if target_records("native_command").where(
            "native_guard_version IS NULL OR native_guard_version <> ?",
            2
+         ).exists?
+        raise Error.new("native_exclusion_pending")
+      end
+      if target_records("native_command").where(
+           "native_assignment_version IS NULL OR native_assignment_version <> ?",
+           1
          ).exists?
         raise Error.new("native_exclusion_pending")
       end
@@ -930,6 +1184,7 @@ module DiscussionBridgeGhost
         mapping_public_id:
           kind == "native_command" ? value.dig("owner", "mapping_id") : nil,
         native_guard_version: kind == "native_command" ? 2 : nil,
+        native_assignment_version: kind == "native_command" ? 1 : nil,
         encrypted_payload:
           @installation.envelope.encrypt(
             "operational_record",
@@ -1049,6 +1304,7 @@ module DiscussionBridgeGhost
                stored["event_count"].is_a?(Integer)
         raise Error.new("identity_conflict")
       end
+      validate_assignment!(command_row, command, state)
       [snapshot(command), state, response]
     rescue KeyError, ArgumentError, TypeError
       raise Error.new("identity_conflict"), cause: nil

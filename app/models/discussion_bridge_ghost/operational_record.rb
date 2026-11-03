@@ -15,6 +15,11 @@ module DiscussionBridgeGhost
               allow_nil: true
     validate :preserve_mapping_locator, on: :update
     validates :native_guard_version, inclusion: { in: [2] }, allow_nil: true
+    validates :native_assignment_version,
+              inclusion: {
+                in: [1]
+              },
+              allow_nil: true
 
     def private_payload
       installation.envelope.decrypt(
@@ -42,6 +47,7 @@ end
 #  encrypted_payload    :text             not null
 #  kind                 :string           not null
 #  native_guard_version :integer
+#  native_assignment_version :integer
 #  record_key           :text             not null
 #  created_at           :datetime         not null
 #  updated_at           :datetime         not null
@@ -51,6 +57,7 @@ end
 # Indexes
 #
 #  idx_db_ghost_record_guard     (installation_id,kind,native_guard_version)
+#  idx_db_ghost_record_assignment (installation_id,kind,native_assignment_version)
 #  idx_db_ghost_record_identity  (installation_id,kind,record_key) UNIQUE
 #  idx_db_ghost_record_mapping   (installation_id,kind,mapping_public_id)
 #

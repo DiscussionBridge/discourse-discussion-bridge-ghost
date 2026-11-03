@@ -20,7 +20,8 @@ The native-command components remain unactivated: no controller or job calls
 them. The development executor sends already-retained ordinary From Discourse
 commands under current receiver authority. It can recover a retained successful
 response through complete native readback without repeating a write. Checked
-physical completion releases the object's temporary exclusion barriers; original
+physical completion atomically hands the object's temporary exclusion barriers
+to durable physical-native/resource/slug assignments; original
 commands, responses and terminal history remain. A completed draft is not a
 public publication, ownership receipt or receiver acknowledgment. Unknown writes
 without positive completion proof stay blocked. Prepared From writes now require
@@ -36,6 +37,14 @@ qualification preserves older original commands/events/receipts, including
 disabled installations, without using foreign connection credentials or issuing
 native/receiver requests. It is bounded and indexed, not a scan of all completed
 history on every ordinary write.
+Completed physical assignments stay exclusive across connections and both
+posts/pages, without preventing many resources on a Ghost site or one source
+going to many destinations. A completed-but-not-yet-owned object cannot become
+unreserved after a crash between local stages. Indexed legacy qualification
+reads original completed history, including disabled same-target installations;
+it does not use their credentials or relabel a pending/retired command as sent.
+These physical reservations are not current ownership receipts, native edit
+authority, public verification or receiver acknowledgments.
 An unstarted intent, or one whose actual transport history proves every attempt
 was not sent, may be explicitly retired with its original history preserved.
 Retirement releases only that command's temporary claims and is terminal; it
@@ -48,6 +57,12 @@ conversion for losses, and derives Ghost's whole-second date from actual source
 activity without a native-save/build fallback. It uses the pinned Core's existing
 Rails HTML5 sanitizer/Loofah/Nokogiri/Crass, not a new service or runtime install.
 It remains development-only, not connected to a publication coordinator.
+Assembled owned-card preparation additionally binds that entire article to its
+declared mapping/work/source edition, escapes source attribution, retains actual
+source dates and selects the required comments host. It refuses an oversized
+complete card rather than silently publishing an excerpt. It neither invents a
+browser asset URL nor authorizes a write; actual loader/assets and current
+ownership-baseline qualification remain separate unfinished work.
 URL-move authority, complete source rendering/metadata preparation, no-response
 recovery, current/public verification,
 coordinators, jobs and administration are still being implemented. Installing
