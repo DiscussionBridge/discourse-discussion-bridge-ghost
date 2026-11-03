@@ -13,11 +13,72 @@ require_relative "../lib/discussion_bridge_ghost/admin_token"
 require_relative "../lib/discussion_bridge_ghost/webhook_signature"
 require_relative "../lib/discussion_bridge_ghost/native_lock"
 require_relative "../lib/discussion_bridge_ghost/wire_json"
+require_relative "../lib/discussion_bridge_ghost/source_activity"
 
 class GhostConnectorFoundationTest < Minitest::Test
   UUID = "a4147162-a4ab-4a43-99af-bbbf335189bd"
   OTHER = "20a59dad-638b-4290-a937-1a5fba7efeb1"
   SYNTHETIC_KEY = "a" * 64
+
+  def test_source_activity_uses_actual_edit_not_creation_or_native_save
+    assert_equal "2020-02-29T03:04:06.000Z",
+                 DiscussionBridgeGhost::SourceActivity.publication_date(
+                   created_at: "2020-02-29T03:04:05.000000001Z",
+                   updated_at: "2020-02-29T03:04:06.999999999Z"
+                 )
+    assert_equal "2020-02-29T03:04:05.000Z",
+                 DiscussionBridgeGhost::SourceActivity.publication_date(
+                   created_at: "2020-02-29T03:04:05Z",
+                   updated_at: "2020-02-29T03:04:05Z"
+                 )
+  end
+
+  def test_source_activity_accepts_independently_known_edit_and_floors_negative_seconds
+    assert_equal "1969-12-31T23:59:59.000Z",
+                 DiscussionBridgeGhost::SourceActivity.publication_date(
+                   created_at: nil,
+                   updated_at: "1969-12-31T23:59:59.999999999Z"
+                 )
+    assert_equal "2026-11-03T11:00:00.000Z",
+                 DiscussionBridgeGhost::SourceActivity.publication_date(
+                   created_at: nil,
+                   updated_at: "2026-11-03T03:00:00.999-08:00"
+                 )
+  end
+
+  def test_source_activity_refuses_unknown_edit_or_precision_losing_chronology
+    [
+      ["2026-11-03T00:00:00Z", nil],
+      %w[2026-11-03T00:00:00.000000002Z 2026-11-03T00:00:00.000000001Z]
+    ].each do |created, updated|
+      error =
+        assert_raises(DiscussionBridgeGhost::Error) do
+          DiscussionBridgeGhost::SourceActivity.publication_date(
+            created_at: created,
+            updated_at: updated
+          )
+        end
+      assert_equal "native_source_unavailable", error.code
+    end
+  end
+
+  def test_source_activity_refuses_impossible_calendar_and_clock_values
+    %w[
+      2026-02-29T00:00:00Z
+      2026-04-31T00:00:00Z
+      2026-01-01T24:00:00Z
+      2026-01-01T00:00:60Z
+      2026-01-01T00:00:00.1234567890Z
+      2026-01-01T00:00:00+24:00
+    ].each do |value|
+      assert_raises(DiscussionBridgeGhost::Error) do
+        DiscussionBridgeGhost::SourceActivity.publication_date(
+          created_at: nil,
+          updated_at: value
+        )
+      end
+    end
+  end
 
   def test_evidence_retention_uses_actual_outcome_identity_without_eviction
     outcome = Struct.new(:status).new(422)

@@ -42,6 +42,12 @@ Retirement releases only that command's temporary claims and is terminal; it
 does not prove a native publication or authorize a receiver acknowledgment.
 Pending, possibly sent, response-backed or completed effects cannot use this
 no-effect path. No controller/job or operator reset action activates it yet.
+Read-only article preparation retains the complete original Source and HTML,
+anchors copied references to their original article, checks actual sanitizer
+conversion for losses, and derives Ghost's whole-second date from actual source
+activity without a native-save/build fallback. It uses the pinned Core's existing
+Rails HTML5 sanitizer/Loofah/Nokogiri/Crass, not a new service or runtime install.
+It remains development-only, not connected to a publication coordinator.
 URL-move authority, complete source rendering/metadata preparation, no-response
 recovery, current/public verification,
 coordinators, jobs and administration are still being implemented. Installing

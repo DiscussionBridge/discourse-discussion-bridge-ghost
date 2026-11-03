@@ -34,6 +34,10 @@ module DiscussionBridgeGhost
         "Retained Ghost exclusion records need local qualification before this target can accept new writes. Original work and receipts are preserved.",
       "native_representation_unavailable" =>
         "The required Ghost content parser is unavailable or incompatible. Reconciliation is required before continuing.",
+      "native_source_unavailable" =>
+        "The actual source activity date could not be projected into Ghost. Original source metadata is preserved; no native-save or build-time fallback is selected.",
+      "native_content_unrepresentable" =>
+        "Ghost content preparation could not preserve the complete source content and references safely. Original source remains retained; no stripped replacement was published.",
       "identity_conflict" =>
         "Retained identity or request history requires reconciliation.",
       "disabled" => "This Ghost connector installation is disabled.",
