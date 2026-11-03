@@ -9,20 +9,21 @@ RSpec.describe DiscussionBridgeGhost::NativeLock do
   # real unpinned pool, rather than weakening the lock assertion or mocking SQL.
   self.use_transactional_tests = false
 
-  before do
+  around do |example|
     # Native CI's primary pool may have only two slots, one retained by the
     # harness. Own exactly two additional test sessions without changing that
     # pool, its fixtures or the database configuration used by Discourse.
-    stub_const("GhostConnectorLockTestRecord", Class.new(ActiveRecord::Base) { self.abstract_class = true })
-    GhostConnectorLockTestRecord.establish_connection(
-      ActiveRecord::Base.connection_db_config.configuration_hash.merge(pool: 2)
-    )
-    @lock_pool = GhostConnectorLockTestRecord.connection_pool
-  end
-
-  after do
-    @lock_pool&.disconnect!
-    GhostConnectorLockTestRecord.remove_connection
+    base = Class.new(ActiveRecord::Base) { self.abstract_class = true }
+    stub_const(Object, :GhostConnectorLockTestRecord, base) do
+      begin
+        base.establish_connection(ActiveRecord::Base.connection_db_config.configuration_hash.merge(pool: 2))
+        @lock_pool = base.connection_pool
+        example.run
+      ensure
+        @lock_pool&.disconnect!
+        base.remove_connection
+      end
+    end
   end
 
   def synchronize(id, &block)

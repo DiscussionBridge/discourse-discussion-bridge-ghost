@@ -25,7 +25,7 @@ module DiscussionBridgeGhost
         @method = route.fetch("method").freeze
         @path = path.freeze
         @query = query.freeze
-        @body_bytes = body_bytes&.freeze
+        @body_bytes = body_bytes&.dup&.force_encoding(Encoding::UTF_8)&.freeze
         @request_sha256 = body_bytes && Digest::SHA256.hexdigest(body_bytes).freeze
         freeze
       end
@@ -40,13 +40,15 @@ module DiscussionBridgeGhost
     end
 
     class Result
-      attr_reader :status, :value, :route_id, :request_sha256
+      attr_reader :status, :value, :route_id, :request_sha256, :body_bytes, :response_headers
 
-      def initialize(status:, value:, packet:)
+      def initialize(status:, value:, packet:, bytes:, headers:)
         @status = status
         @value = freeze_value(value)
         @route_id = packet.route_id
         @request_sha256 = packet.request_sha256
+        @body_bytes = bytes.dup.force_encoding(Encoding::UTF_8).freeze
+        @response_headers = freeze_value(headers.slice("content-type", "content-encoding"))
         freeze
       end
 
@@ -129,14 +131,19 @@ module DiscussionBridgeGhost
       unless status.is_a?(Integer) && status.between?(200, 599) && headers.is_a?(Hash) && bytes.is_a?(String)
         raise Error.new("response_invalid")
       end
-      lowered = headers.transform_keys { |key| key.to_s.downcase }
+      lowered = {}
+      headers.each do |name, value|
+        key = name.to_s.downcase
+        raise Error.new("response_invalid") if lowered.key?(key)
+        lowered[key] = value
+      end
       encoding = lowered["content-encoding"]
       raise Error.new("response_invalid") unless encoding.nil? || encoding.to_s.downcase == "identity"
       if status == 204
         unless route.fetch("success_http").include?(204) && bytes.empty?
           raise Error.new("response_invalid")
         end
-        return Result.new(status: status, value: nil, packet: packet)
+        return Result.new(status: status, value: nil, packet: packet, bytes: bytes, headers: lowered)
       end
       raise Error.new("response_invalid") unless JSON_MEDIA.match?(lowered["content-type"].to_s)
       maximum = route["response"] == "ContentChunk" ? REQUEST_MAXIMUM : RESPONSE_MAXIMUM
@@ -156,7 +163,7 @@ module DiscussionBridgeGhost
       else
         raise Error.new("response_invalid")
       end
-      Result.new(status: status, value: value, packet: packet)
+      Result.new(status: status, value: value, packet: packet, bytes: bytes, headers: lowered)
     end
 
     def maximum_response_bytes(packet)

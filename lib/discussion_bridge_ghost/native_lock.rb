@@ -26,7 +26,7 @@ module DiscussionBridgeGhost
         raise Error.new("native_lock_lost") unless connection.adapter_name == "PostgreSQL"
         acquired = connection.uncached { connection.select_value("SELECT pg_try_advisory_lock(#{selected})") }
         raise Error.new("native_lock_busy") unless acquired == true
-        lease = Lease.new(connection, selected)
+        lease = Lease.new(connection, selected, native_target_id)
         lease.assert!
         yield lease
       ensure
@@ -43,8 +43,11 @@ module DiscussionBridgeGhost
     end
 
     class Lease
-      def initialize(connection, key)
+      attr_reader :native_target_id
+
+      def initialize(connection, key, native_target_id)
         @connection = connection
+        @native_target_id = native_target_id.dup.freeze
         @session = connection.raw_connection
         @pid = connection.uncached { connection.select_value("SELECT pg_backend_pid()") }
         @high = (key >> 32) & 0xffff_ffff

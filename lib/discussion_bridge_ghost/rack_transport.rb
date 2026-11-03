@@ -9,6 +9,10 @@ module DiscussionBridgeGhost
   # This is not an administrator session, a direct coordinator call, or an HTTP
   # proxy. No ambient cookies, API keys, shared-session headers or env are copied.
   class RackTransport
+    def bound_to?(protocol, connection_id)
+      @protocol.equal?(protocol) && @connection_id == connection_id
+    end
+
     def initialize(protocol:, connection_id:, connection_secret:, app: Rails.application, base_url: Discourse.base_url)
       unless connection_id.is_a?(String) && /\Adbc_[a-f0-9]{24}\z/.match?(connection_id) &&
                connection_secret.is_a?(String) && connection_secret.bytesize.between?(32, 256) &&
