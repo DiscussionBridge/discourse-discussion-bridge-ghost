@@ -114,57 +114,61 @@ RSpec.describe DiscussionBridgeGhost::GhostHttp do
   it "closes a TCP-created TLS-incomplete connection on the whole-operation deadline without retry" do
     # Execute the actual pinned Core/NetHTTP connect path, not WebMock's request
     # interception. TCP/TLS objects are synthetic; no DNS or socket is opened.
-    # Core's test setup substitutes FinalDestination::HTTP. Load its actual
-    # pinned implementation into an example-scoped constant, restored by RSpec.
-    # No Core file is changed; WebMock still forbids real outbound requests.
-    stub_const("FinalDestination::HTTP", Class.new(Net::HTTP))
-    load Rails.root.join("lib/final_destination/http.rb")
-    client = FinalDestination::HTTP.allocate
-    client.send(:initialize, "ghost-native.example", 443)
-    expect(client.method(:connect).owner).to eq(FinalDestination::HTTP)
-    expect(client.method(:connect).source_location.first).to eq(
-      Rails.root.join("lib/final_destination/http.rb").to_s
-    )
-    expect(
-      client.method(:connect).super_method.source_location.first
-    ).to include("net-http-0.9.1/lib/net/http.rb")
-    tcp = mock("synthetic TCP socket")
-    tcp.stubs(:setsockopt)
-    tcp.expects(:close).once
-    tls = Struct.new(:sync_close, :hostname, :closed).new
-    tls.define_singleton_method(:close) do
-      self.closed = true
-      tcp.close if sync_close
-    end
-    FinalDestination::SSRFDetector
-      .expects(:lookup_and_filter_ips)
-      .with("ghost-native.example", timeout: nil)
-      .returns(["93.184.216.34"])
-    client.expects(:timeouted_connect).once.returns(tcp)
-    OpenSSL::SSL::SSLSocket.expects(:new).once.with(tcp, anything).returns(tls)
-    client.define_singleton_method(:ssl_socket_connect) do |_socket, _timeout|
-      sleep 0.3
-    end
-    # WebMock normally defers connection setup until request interception.
-    # Drive the real connect implementation directly through this test-only
-    # start hook; cancellation must close its local socket before returning.
-    client.define_singleton_method(:start) { send(:connect) }
-    http =
-      described_class.new(
-        origin: "https://ghost-native.example",
-        protocol: DiscussionBridgeGhost::WireProtocol.new,
-        guard: -> {},
-        deadline_seconds: 0.1,
-        factory: ->(_host, _port) { client }
+    # Core's native helper temporarily restores its actual filtered HTTP class
+    # and restores the WebMock adapter in ensure. Our explicit resolver/socket
+    # expectations keep all I/O synthetic without reloading any Core source.
+    FinalDestination::TestHelper.stub_to_fail do
+      client = FinalDestination::HTTP.allocate
+      client.send(:initialize, "ghost-native.example", 443)
+      expect(client.method(:connect).owner).to eq(FinalDestination::HTTP)
+      expect(client.method(:connect).source_location.first).to eq(
+        Rails.root.join("lib/final_destination/http.rb").to_s
       )
-    error = nil
-    expect { http.request("GET", "/", maximum_bytes: 100) }.to raise_error(
-      described_class::Failure
-    ) { |failure| error = failure }
-    expect(error.cause).to eq(nil)
-    expect(tls.closed).to eq(true)
-    expect(tls.sync_close).to eq(true)
-    expect(client.max_retries).to eq(0)
-    expect(client.instance_variable_get(:@socket)).to eq(nil)
+      expect(
+        client.method(:connect).super_method.source_location.first
+      ).to include("net-http-0.9.1/lib/net/http.rb")
+      tcp = mock("synthetic TCP socket")
+      tcp.stubs(:setsockopt)
+      tcp.expects(:close).once
+      tls = Struct.new(:sync_close, :hostname, :closed).new
+      tls.define_singleton_method(:close) do
+        self.closed = true
+        tcp.close if sync_close
+      end
+      FinalDestination::SSRFDetector
+        .expects(:lookup_and_filter_ips)
+        .with("ghost-native.example", timeout: nil)
+        .returns(["93.184.216.34"])
+      client.expects(:timeouted_connect).once.returns(tcp)
+      OpenSSL::SSL::SSLSocket
+        .expects(:new)
+        .once
+        .with(tcp, anything)
+        .returns(tls)
+      client.define_singleton_method(:ssl_socket_connect) do |_socket, _timeout|
+        sleep 0.3
+      end
+      # WebMock normally defers connection setup until request interception.
+      # Drive the real connect implementation directly through this test-only
+      # start hook; cancellation must close its local socket before returning.
+      client.define_singleton_method(:start) { send(:connect) }
+      http =
+        described_class.new(
+          origin: "https://ghost-native.example",
+          protocol: DiscussionBridgeGhost::WireProtocol.new,
+          guard: -> {},
+          deadline_seconds: 0.1,
+          factory: ->(_host, _port) { client }
+        )
+      error = nil
+      expect { http.request("GET", "/", maximum_bytes: 100) }.to raise_error(
+        described_class::Failure
+      ) { |failure| error = failure }
+      expect(error.cause).to eq(nil)
+      expect(tls.closed).to eq(true)
+      expect(tls.sync_close).to eq(true)
+      expect(client.max_retries).to eq(0)
+      expect(client.instance_variable_get(:@socket)).to eq(nil)
+    end
   end
 end
