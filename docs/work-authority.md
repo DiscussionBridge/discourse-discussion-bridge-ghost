@@ -39,6 +39,21 @@ when its generation is older than the incoming work. A missing fence is not
 treated as first use when a completed local checkpoint or already-owned native
 baseline proves earlier execution. These inconsistencies stop for reconciliation;
 the helper does not repair rows, reset counters or manufacture empty history.
+This check is mapping-wide: an older work UUID's successful checkpoint also
+contradicts first use, even while the native ID is still null. Historical records
+are validated against their own retained identity, authority, original scope and
+URL, not rewritten to the incoming work.
+
+Connector-owned operational records have a nullable public mapping UUID locator
+and an index on installation/kind/locator. New work/fence rows set it on creation;
+normal updates cannot rebind it. The locator is not authorization and must agree
+with the encrypted identity whenever read. Ordinary missing-fence lookup reads
+only matching indexed history plus legacy NULL locators, in 100-row batches.
+Legacy ciphertext and locator values remain unchanged: there is no automatic
+backfill, repair, counter reset or new history. Ambiguous malformed legacy rows
+stop for reconciliation. Valid history for a different mapping does not imply
+that this mapping's fence is missing. Fresh current receiver proof remains
+required after any legitimate first-use or never-successful predecessor path.
 
 The guard requires the operation stage: native mutation only while `leased`;
 public verification only while `synchronized`, with the native ID supplied from

@@ -8,6 +8,12 @@ module DiscussionBridgeGhost
     belongs_to :installation, class_name: "DiscussionBridgeGhost::Installation"
     validates :kind, :record_key, :encrypted_payload, presence: true
     validates :record_key, uniqueness: { scope: %i[installation_id kind] }
+    validates :mapping_public_id,
+              format: {
+                with: SecretEnvelope::UUID
+              },
+              allow_nil: true
+    validate :preserve_mapping_locator, on: :update
 
     def private_payload
       installation.envelope.decrypt(
@@ -15,6 +21,14 @@ module DiscussionBridgeGhost
         encrypted_payload,
         binding: JSON.generate([kind, record_key])
       )
+    end
+
+    private
+
+    def preserve_mapping_locator
+      if will_save_change_to_mapping_public_id?
+        errors.add(:base, "Retained work mapping metadata cannot be rebound.")
+      end
     end
   end
 end
@@ -25,6 +39,7 @@ end
 #
 #  id                :bigint           not null, primary key
 #  encrypted_payload :text             not null
+#  mapping_public_id :uuid
 #  kind              :string           not null
 #  record_key        :text             not null
 #  created_at        :datetime         not null
@@ -34,6 +49,7 @@ end
 # Indexes
 #
 #  idx_db_ghost_record_identity  (installation_id,kind,record_key) UNIQUE
+#  idx_db_ghost_record_mapping   (installation_id,kind,mapping_public_id)
 #
 # Foreign Keys
 #

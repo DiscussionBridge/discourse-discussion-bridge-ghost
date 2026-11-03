@@ -216,7 +216,7 @@ module DiscussionBridgeGhost
           # work started. Keep the original baseline; guard!(:verify) requires
           # that ID separately from the retained native intent/receipt.
           @initial_native_id = original_native&.dup&.freeze
-          validate_checkpoint!(retained)
+          validate_checkpoint!(retained, record: row)
         else
           write_record("work_authority", @key, initial_state)
         end
@@ -227,13 +227,67 @@ module DiscussionBridgeGhost
     def checkpoint
       row = find_record("work_authority", @key)
       raise Error.new("identity_conflict") unless row
-      validate_checkpoint!(row.private_payload)
+      validate_checkpoint!(row.private_payload, record: row)
     end
 
-    def validate_checkpoint!(state)
+    def validate_checkpoint!(state, record: nil)
       unless state.is_a?(Hash) && state.keys.sort == initial_state.keys.sort &&
                state.except("next_renewal", "pending", "last_lease") ==
                  initial_state.except("next_renewal", "pending", "last_lease")
+        raise Error.new("identity_conflict")
+      end
+      validate_history!(
+        state,
+        record_key: @key,
+        indexed_mapping: record&.mapping_public_id
+      )
+      state
+    end
+
+    # History is evidence, not current authority. Validate its own identity and
+    # original scope/URL without rebasing it to a newer work item or URL move.
+    def validate_history!(state, record_key:, indexed_mapping:)
+      unless state.is_a?(Hash) && state.keys.sort == initial_state.keys.sort &&
+               state.fetch("format") == "ghost-work-authority-1" &&
+               state.fetch("binding") == @context.binding
+        raise Error.new("identity_conflict")
+      end
+      identity, mapping, authority =
+        state.values_at("identity", "mapping", "authority")
+      validate_work_identity!(identity)
+      unless mapping.is_a?(Hash) && mapping.keys.sort == MAPPING_FIELDS.sort &&
+               mapping.fetch("mapping_id") == identity.fetch("mapping_id") &&
+               mapping.fetch("source_id") == identity.fetch("source_id") &&
+               mapping.fetch("connection_id") ==
+                 @installation.connection_public_id &&
+               record_key ==
+                 "#{identity.fetch("work_id")}:#{identity.fetch("lease_generation")}"
+        raise Error.new("identity_conflict")
+      end
+      %w[mapping_id resource_id].each do |field|
+        @protocol.validate!("UUID", mapping.fetch(field))
+      end
+      %w[source_id external_id].each do |field|
+        @protocol.validate!("OpaqueId", mapping.fetch(field))
+      end
+      @protocol.validate!("Mode", mapping.fetch("presentation_mode"))
+      @protocol.validate!("Revision", state.fetch("scope_revision"))
+      unless @protocol.url_origin_key(mapping.fetch("canonical_url")) ==
+               @protocol.origin_key(@context.binding.fetch("ghost_origin"))
+        raise Error.new("identity_conflict")
+      end
+      unless indexed_mapping.nil? ||
+               indexed_mapping == identity.fetch("mapping_id")
+        raise Error.new("identity_conflict")
+      end
+      native_id = state.fetch("initial_native_id")
+      valid_native =
+        native_id.nil? ||
+          (native_id.is_a?(String) && /\A[a-f0-9]{24}\z/.match?(native_id))
+      raise Error.new("identity_conflict") unless valid_native
+      @protocol.validate!("LeaseAuthority", authority)
+      fields = %w[work_id lease_generation source_revision policy_revision]
+      unless authority.slice(*fields) == identity.slice(*fields)
         raise Error.new("identity_conflict")
       end
       @protocol.validate!("UInt", state.fetch("next_renewal"))
@@ -250,12 +304,15 @@ module DiscussionBridgeGhost
       unless (state.fetch("next_renewal") == 0) == last_lease.nil?
         raise Error.new("identity_conflict")
       end
-      validate_lease!(last_lease) unless last_lease.nil?
+      unless last_lease.nil?
+        validate_lease!(last_lease, identity: identity, authority: authority)
+      end
       state
     end
 
     def renewal_key(state)
-      "renew:#{@key}:#{state.fetch("next_renewal")}"
+      identity = state.fetch("identity")
+      "renew:#{identity.fetch("work_id")}:#{identity.fetch("lease_generation")}:#{state.fetch("next_renewal")}"
     end
 
     def begin_renewal!
@@ -310,12 +367,12 @@ module DiscussionBridgeGhost
       lease
     end
 
-    def validate_lease!(lease)
+    def validate_lease!(lease, identity: @identity, authority: @authority)
       @protocol.validate!("Lease", lease)
-      unless lease.fetch("work").slice(*WORK_FIELDS) == @identity &&
-               lease.fetch("lease_token") == @authority.fetch("lease_token") &&
+      unless lease.fetch("work").slice(*WORK_FIELDS) == identity &&
+               lease.fetch("lease_token") == authority.fetch("lease_token") &&
                lease.fetch("lease_generation") ==
-                 @authority.fetch("lease_generation") &&
+                 authority.fetch("lease_generation") &&
                Time.iso8601(lease.fetch("expires_at")) >
                  Time.iso8601(lease.fetch("server_time"))
         raise Error.new("identity_conflict")
@@ -331,12 +388,17 @@ module DiscussionBridgeGhost
         if checkpoint.fetch("next_renewal") > 0 || @initial_native_id
           raise Error.new("identity_conflict")
         end
+        assert_no_successful_mapping_history!
         return
       end
       fence = row.private_payload
       unless fence.is_a?(Hash) &&
                fence.keys.sort == %w[binding generation identity] &&
                fence.fetch("binding") == @context.binding
+        raise Error.new("identity_conflict")
+      end
+      unless row.mapping_public_id.nil? ||
+               row.mapping_public_id == @identity.fetch("mapping_id")
         raise Error.new("identity_conflict")
       end
       @protocol.validate!("PositiveUInt", fence.fetch("generation"))
@@ -357,6 +419,31 @@ module DiscussionBridgeGhost
            )
         raise Error.new("work_authority_unavailable")
       end
+    end
+
+    def assert_no_successful_mapping_history!
+      # New records use the indexed public UUID locator. Legacy NULL locators
+      # remain readable in bounded batches; no global decrypt/rewrite/backfill
+      # is performed for ordinary indexed history belonging to other mappings.
+      @installation
+        .operational_records
+        .where(
+          kind: "work_authority",
+          mapping_public_id: [@identity.fetch("mapping_id"), nil]
+        )
+        .find_each(batch_size: 100) do |row|
+          history =
+            validate_history!(
+              row.private_payload,
+              record_key: row.record_key,
+              indexed_mapping: row.mapping_public_id
+            )
+          if history.fetch("identity").fetch("mapping_id") ==
+               @identity.fetch("mapping_id") &&
+               history.fetch("next_renewal") > 0
+            raise Error.new("identity_conflict")
+          end
+        end
     end
 
     def validate_work_identity!(identity)
@@ -403,7 +490,15 @@ module DiscussionBridgeGhost
     def write_record(kind, key, value)
       row =
         find_record(kind, key) ||
-          @installation.operational_records.build(kind: kind, record_key: key)
+          @installation.operational_records.build(
+            kind: kind,
+            record_key: key,
+            mapping_public_id: @identity.fetch("mapping_id")
+          )
+      unless row.mapping_public_id.nil? ||
+               row.mapping_public_id == @identity.fetch("mapping_id")
+        raise Error.new("identity_conflict")
+      end
       row.encrypted_payload =
         @installation.envelope.encrypt(
           "operational_record",

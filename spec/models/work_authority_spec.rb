@@ -232,7 +232,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       @installation
         .operational_records
         .order(:id)
-        .pluck(:id, :kind, :record_key, :encrypted_payload),
+        .pluck(:id, :kind, :record_key, :mapping_public_id, :encrypted_payload),
       @installation
         .mutations
         .order(:id)
@@ -925,5 +925,218 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     end
     expect(requests).to eq([])
     expect(retained_evidence).to eq(before)
+  end
+
+  [false, true].each do |legacy|
+    it "rejects cross-work missing-fence history with #{legacy ? "legacy NULL" : "indexed"} mapping metadata" do
+      with_runtime do |context, journal|
+        lease = claim(context, journal)
+        authority(context, journal, lease).guard!(operation: :mutate)
+      end
+      previous =
+        @installation.operational_records.find_by!(kind: "work_authority")
+      previous.update_columns(mapping_public_id: nil) if legacy
+      previous_ciphertext = previous.reload.encrypted_payload
+      next_work!
+      newer = nil
+      with_runtime do |context, journal|
+        newer = claim(context, journal, key: "claim:cross-work-null-native")
+      end
+      expect(@mapping.reload.destination_native_id).to eq(nil)
+      @installation.operational_records.find_by!(kind: "mapping_fence").delete
+      before = retained_evidence
+      requests = []
+      with_runtime(app: observed_app(requests)) do |context, journal|
+        expect { authority(context, journal, newer) }.to raise_error(
+          DiscussionBridgeGhost::Error,
+          /identity/
+        )
+      end
+      expect(requests).to eq([])
+      expect(previous.reload.encrypted_payload).to eq(previous_ciphertext)
+      expect(previous.mapping_public_id).to eq(
+        legacy ? nil : @mapping.mapping_id
+      )
+      expect(retained_evidence).to eq(before)
+    end
+  end
+
+  it "permits a later same-mapping work item when retained earlier work never completed a guard" do
+    previous = nil
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      authority(context, journal, lease)
+      previous =
+        @installation.operational_records.find_by!(kind: "work_authority")
+    end
+    expect(previous.private_payload.fetch("next_renewal")).to eq(0)
+    original = previous.encrypted_payload
+    next_work!
+    requests = []
+    with_runtime(app: observed_app(requests)) do |context, journal|
+      newer = claim(context, journal, key: "claim:never-completed-predecessor")
+      expect(
+        authority(context, journal, newer)
+          .guard!(operation: :mutate)
+          .fetch("work")
+          .fetch("work_id")
+      ).to eq(newer.fetch("work").fetch("work_id"))
+    end
+    expect(requests.length).to eq(1)
+    expect(previous.reload.encrypted_payload).to eq(original)
+  end
+
+  [false, true].each do |legacy|
+    it "permits first use with valid #{legacy ? "legacy NULL" : "indexed"} successful history for another mapping" do
+      with_runtime do |context, journal|
+        lease = claim(context, journal)
+        held = authority(context, journal, lease)
+        historical = state.deep_dup
+        old_identity =
+          historical.fetch("identity").merge(
+            "work_id" => SecureRandom.uuid,
+            "mapping_id" => SecureRandom.uuid,
+            "source_id" => "topic:other-synthetic-source",
+            "attempt_cycle" => SecureRandom.uuid
+          )
+        historical["identity"] = old_identity
+        historical["mapping"].merge!(
+          "mapping_id" => old_identity.fetch("mapping_id"),
+          "source_id" => old_identity.fetch("source_id"),
+          "resource_id" => SecureRandom.uuid,
+          "external_id" => "other-article",
+          "canonical_url" => "#{@target.ghost_origin}/other-article/"
+        )
+        historical["authority"].merge!(
+          old_identity.slice(
+            "work_id",
+            "source_revision",
+            "policy_revision",
+            "lease_generation"
+          )
+        )
+        historical["next_renewal"] = 1
+        historical["last_lease"] = JSON.parse(JSON.generate(lease))
+        historical.fetch("last_lease").fetch("work").merge!(old_identity)
+        key =
+          "#{old_identity.fetch("work_id")}:#{old_identity.fetch("lease_generation")}"
+        row =
+          @installation.operational_records.create!(
+            kind: "work_authority",
+            record_key: key,
+            mapping_public_id: legacy ? nil : old_identity.fetch("mapping_id"),
+            encrypted_payload:
+              @installation.envelope.encrypt(
+                "operational_record",
+                historical,
+                binding: JSON.generate(["work_authority", key])
+              )
+          )
+        original = row.encrypted_payload
+        expect(
+          held.guard!(operation: :mutate).fetch("mapping").fetch("mapping_id")
+        ).to eq(@mapping.mapping_id)
+        expect(row.reload.encrypted_payload).to eq(original)
+        expect(row.mapping_public_id).to eq(
+          legacy ? nil : old_identity.fetch("mapping_id")
+        )
+      end
+    end
+  end
+
+  it "does not decrypt unrelated indexed mapping history during ordinary first use" do
+    row =
+      @installation.operational_records.create!(
+        kind: "work_authority",
+        record_key: "#{SecureRandom.uuid}:1",
+        mapping_public_id: SecureRandom.uuid,
+        encrypted_payload: "SYNTHETIC-other-mapping-unreadable"
+      )
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      expect(
+        authority(context, journal, lease)
+          .guard!(operation: :mutate)
+          .fetch("work")
+          .fetch("work_id")
+      ).to eq(@work.work_id)
+    end
+    expect(row.reload.encrypted_payload).to eq(
+      "SYNTHETIC-other-mapping-unreadable"
+    )
+  end
+
+  it "rejects ambiguous malformed legacy history without creating or retagging records" do
+    key = "#{SecureRandom.uuid}:1"
+    row =
+      @installation.operational_records.create!(
+        kind: "work_authority",
+        record_key: key,
+        mapping_public_id: nil,
+        encrypted_payload:
+          @installation.envelope.encrypt(
+            "operational_record",
+            false,
+            binding: JSON.generate(["work_authority", key])
+          )
+      )
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      before = retained_evidence
+      expect { authority(context, journal, lease) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect(retained_evidence).to eq(before)
+    end
+    expect(row.reload.mapping_public_id).to eq(nil)
+  end
+
+  it "does not trust a current record's locator over its encrypted mapping identity" do
+    lease = nil
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      authority(context, journal, lease)
+    end
+    row = @installation.operational_records.find_by!(kind: "work_authority")
+    row.update_columns(mapping_public_id: SecureRandom.uuid) # synthetic malformed restored metadata
+    before = retained_evidence
+    with_runtime do |context, journal|
+      expect { authority(context, journal, lease) }.to raise_error(
+        DiscussionBridgeGhost::Error,
+        /identity/
+      )
+    end
+    expect(retained_evidence).to eq(before)
+  end
+
+  it "has a nullable indexed locator without permitting normal rebinding or changing ciphertext" do
+    column =
+      DiscussionBridgeGhost::OperationalRecord.columns_hash.fetch(
+        "mapping_public_id"
+      )
+    expect(column.type).to eq(:uuid)
+    expect(column.null).to eq(true)
+    index =
+      ActiveRecord::Base
+        .connection
+        .indexes("discussion_bridge_ghost_records")
+        .find { |entry| entry.name == "idx_db_ghost_record_mapping" }
+    expect(index.columns).to eq(%w[installation_id kind mapping_public_id])
+    expect(index.unique).to eq(false)
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      authority(context, journal, lease)
+    end
+    row = @installation.operational_records.find_by!(kind: "work_authority")
+    original = row.encrypted_payload
+    expect(row.update(mapping_public_id: SecureRandom.uuid)).to eq(false)
+    expect(row.reload.mapping_public_id).to eq(@mapping.mapping_id)
+    expect(row.encrypted_payload).to eq(original)
+    receipt =
+      @installation.operational_records.find_by!(kind: "mutation_receipt")
+    expect(receipt.mapping_public_id).to eq(nil)
+    expect(
+      receipt.private_payload.fetch("binding").fetch("connection_id")
+    ).to eq(@connection.public_id)
   end
 end
