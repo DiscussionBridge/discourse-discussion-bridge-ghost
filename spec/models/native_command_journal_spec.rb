@@ -189,14 +189,25 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
       .pluck(:id, :kind, :record_key, :encrypted_payload)
   end
 
-  def completed_response(journal, context, args)
+  def retained_history_snapshot(installation = @installation)
+    installation
+      .operational_records
+      .where.not(kind: %w[native_unknown_create native_exclusion_enrollment])
+      .order(:id)
+      .pluck(:id, :kind, :record_key, :encrypted_payload)
+  end
+
+  def completed_response(journal, context, args, native_overrides: {})
     command = journal.prepare(**args)
     native =
-      args.fetch(:candidate).merge(
-        "id" => args.dig(:identity, "native_id") || "a" * 24,
-        "type" => args.dig(:identity, "kind"),
-        "updated_at" => "2026-11-03T10:01:00.000Z"
-      )
+      args
+        .fetch(:candidate)
+        .merge(
+          "id" => args.dig(:identity, "native_id") || "a" * 24,
+          "type" => args.dig(:identity, "kind"),
+          "updated_at" => "2026-11-03T10:01:00.000Z"
+        )
+        .merge(native_overrides)
     response = { "#{args.dig(:identity, "kind")}s" => [native] }
     stub_request(
       args.dig(:request, "method").downcase.to_sym,
@@ -541,6 +552,251 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
       }.to raise_error(DiscussionBridgeGhost::Error)
     end
     expect(a_request(:any, /ghost-native-/)).not_to have_been_made
+  end
+
+  %w[current missing-other-disabled stale-owned].each do |shape|
+    it "requalifies already-discovered create history after #{shape} projection reconstruction without changing original evidence or repeating effects" do
+      args = arguments
+      other = make_installation(@installation.native_target)
+      native, original, retained = nil, nil, nil
+      with_journal do |journal, context|
+        command, native = completed_response(journal, context, args)
+        retained = journal.retained(args.fetch(:command_id))
+        expect(retained.dig("state", "discovery", "guard_required")).to eq(
+          false
+        )
+        original = retained_history_snapshot
+        context.commit do
+          row("native_command", args.fetch(:command_id)).update_columns(
+            native_guard_version: nil
+          )
+          @installation
+            .operational_records
+            .where(kind: "native_exclusion_enrollment")
+            .delete_all
+          if shape == "stale-owned"
+            journal.send(:install_create_guard!, command)
+          end
+        end
+      end
+      foreign = shape == "missing-other-disabled"
+      @installation.update!(enabled: false) if foreign
+      2.times do
+        with_journal(foreign ? other : @installation) do |journal, context|
+          history =
+            (
+              if foreign
+                described_class.new(
+                  context: context,
+                  history_installation: @installation
+                )
+              else
+                journal
+              end
+            )
+          2.times do
+            history.qualify_retained_exclusion!(args.fetch(:command_id))
+          end
+          expect(history.retained(args.fetch(:command_id))).to eq(retained)
+          expect(retained_history_snapshot).to eq(original)
+          expect(
+            row("native_command", args.fetch(:command_id)).native_guard_version
+          ).to eq(2)
+          expect(
+            @installation.operational_records.where(
+              kind: "native_unknown_create"
+            )
+          ).not_to exist
+          if foreign
+            expect(@installation.reload.enabled).to eq(false)
+            expect { history.prepare(**arguments) }.to raise_error(
+              DiscussionBridgeGhost::Error
+            )
+          end
+          expect {
+            journal.assert_clear!(
+              resource_id: SecureRandom.uuid,
+              kind: "post",
+              native_id: native.fetch("id"),
+              slugs: ["different-slug"]
+            )
+          }.to raise_error(DiscussionBridgeGhost::Error)
+          expect {
+            journal.assert_clear!(
+              resource_id: SecureRandom.uuid,
+              kind: "post",
+              native_id: "b" * 24,
+              slugs: [native.fetch("slug")]
+            )
+          }.to raise_error(DiscussionBridgeGhost::Error)
+          expect(
+            journal.assert_clear!(
+              resource_id: SecureRandom.uuid,
+              kind: "post",
+              native_id: "b" * 24,
+              slugs: ["independent-slug"]
+            )
+          ).to eq(true)
+          # Reconstruct the nullable locator again, retaining all encrypted
+          # command/progress/event/alias evidence and the protected enrollment.
+          context.commit do
+            row("native_command", args.fetch(:command_id)).update_columns(
+              native_guard_version: nil
+            )
+          end
+        end
+      end
+      @installation.update!(enabled: true) if foreign
+      stub_native_reads(args, native)
+      with_journal do |journal, context|
+        expect(retained_history_snapshot).to eq(original)
+        executor =
+          DiscussionBridgeGhost::NativeExecutor.new(
+            context: context,
+            journal: journal,
+            api_key: "a" * 24 + ":" + "12" * 32
+          )
+        completed = executor.recover(args.fetch(:command_id))
+        expect(completed.fetch("native_id")).to eq(native.fetch("id"))
+        expect(executor.recover(args.fetch(:command_id))).to eq(completed)
+        expect(
+          journal.retained(args.fetch(:command_id)).fetch("command")
+        ).to eq(retained.fetch("command"))
+      end
+      expect(
+        a_request(
+          :post,
+          @installation.native_target.admin_origin + args.dig(:request, "path")
+        )
+      ).to have_been_made.once
+      expect(a_request(:put, %r{ghost/api/admin})).not_to have_been_made
+    end
+  end
+
+  it "rolls back interrupted requalification without changing retained discovery and succeeds on a fresh retry" do
+    args = arguments
+    with_journal do |journal, context|
+      command, native = completed_response(journal, context, args)
+      retained = journal.retained(args.fetch(:command_id))
+      context.commit do
+        row("native_command", args.fetch(:command_id)).update_columns(
+          native_guard_version: nil
+        )
+        journal.send(:install_create_guard!, command)
+      end
+      before = encrypted_snapshot
+      fired = false
+      injection =
+        TracePoint.new(:return) do |event|
+          if !fired && event.self.equal?(journal) &&
+               event.method_id == :remove_create_guard!
+            fired = true
+            raise DiscussionBridgeGhost::Error.new("native_lock_lost")
+          end
+        end
+      begin
+        injection.enable
+        expect {
+          journal.qualify_retained_exclusion!(args.fetch(:command_id))
+        }.to raise_error(DiscussionBridgeGhost::Error) { |error|
+          expect(error.code).to eq("native_lock_lost")
+        }
+      ensure
+        injection.disable
+      end
+      expect(fired).to eq(true)
+      expect(
+        row("native_command", args.fetch(:command_id)).native_guard_version
+      ).to eq(nil)
+      expect(encrypted_snapshot).to eq(before)
+      expect(journal.retained(args.fetch(:command_id))).to eq(retained)
+      journal.qualify_retained_exclusion!(args.fetch(:command_id))
+      expect(journal.retained(args.fetch(:command_id))).to eq(retained)
+      stub_native_reads(args, native)
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: journal,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      expect(
+        executor.recover(args.fetch(:command_id)).fetch("native_id")
+      ).to eq(native.fetch("id"))
+    end
+    expect(
+      a_request(
+        :post,
+        @installation.native_target.admin_origin + args.dig(:request, "path")
+      )
+    ).to have_been_made.once
+    expect(a_request(:put, %r{ghost/api/admin})).not_to have_been_made
+  end
+
+  it "retains conservative partial-discovery protection through repeated cross-installation qualification" do
+    args = arguments
+    other = make_installation(@installation.native_target)
+    original, retained = nil, nil
+    with_journal do |journal, context|
+      completed_response(
+        journal,
+        context,
+        args,
+        native_overrides: {
+          "slug" => nil
+        }
+      )
+      retained = journal.retained(args.fetch(:command_id))
+      expect(retained.dig("state", "discovery", "guard_required")).to eq(true)
+      original = retained_history_snapshot
+      context.commit do
+        row("native_command", args.fetch(:command_id)).update_columns(
+          native_guard_version: nil
+        )
+        @installation
+          .operational_records
+          .where(kind: %w[native_unknown_create native_exclusion_enrollment])
+          .delete_all
+      end
+    end
+    @installation.update!(enabled: false)
+    2.times do
+      with_journal(other) do |journal, context|
+        history =
+          described_class.new(
+            context: context,
+            history_installation: @installation
+          )
+        history.qualify_retained_exclusion!(args.fetch(:command_id))
+        expect(history.retained(args.fetch(:command_id))).to eq(retained)
+        expect(retained_history_snapshot).to eq(original)
+        expect(
+          @installation
+            .operational_records
+            .where(kind: "native_unknown_create")
+            .count
+        ).to eq(1)
+        expect {
+          journal.assert_clear!(
+            resource_id: SecureRandom.uuid,
+            kind: "page",
+            native_id: "b" * 24,
+            slugs: ["independent-slug"]
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        context.commit do
+          row("native_command", args.fetch(:command_id)).update_columns(
+            native_guard_version: nil
+          )
+        end
+      end
+    end
+    expect(
+      a_request(
+        :post,
+        @installation.native_target.admin_origin + args.dig(:request, "path")
+      )
+    ).to have_been_made.once
+    expect(a_request(:put, %r{ghost/api/admin})).not_to have_been_made
   end
 
   it "recovers a completed create response after restart without another POST, preserves original identity, and retains a terminal history after release" do

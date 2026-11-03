@@ -434,14 +434,18 @@ module DiscussionBridgeGhost
       @context.commit do
         row = record("native_command", id)
         raise Error.new("identity_conflict") unless row
-        next if row.native_guard_version == 2
+        if row.native_guard_version == 2
+          load_state(id)
+          next
+        end
         unless row.native_guard_version.nil?
           raise Error.new("identity_conflict")
         end
         command, state, response = load_state(id)
-        if command.dig("identity", "native_id").nil? &&
-             state["pending_attempt"] && !state["completion"]
+        if unknown_create_guard_required?(command, state)
           install_create_guard!(command)
+        else
+          remove_create_guard!(command)
         end
         enrollment = record("native_exclusion_enrollment", id)
         if enrollment
@@ -460,6 +464,10 @@ module DiscussionBridgeGhost
              command.dig("identity", "native_id").nil?
           discover!(command, state, response)
         end
+        # Do not commit a qualified projection that its own normal reader would
+        # reject. Discovery and its aliases are original protected evidence;
+        # reconstructing the nullable index must not invent unknown work.
+        load_state(id)
       end
     end
 
@@ -544,6 +552,12 @@ module DiscussionBridgeGhost
         "command_id" => command.fetch("command_id"),
         "native_target_id" => @binding.fetch("native_target_id")
       }
+    end
+
+    def unknown_create_guard_required?(command, state)
+      command.dig("identity", "native_id").nil? && state["pending_attempt"] &&
+        !state["completion"] &&
+        (!state["discovery"] || state.dig("discovery", "guard_required"))
     end
 
     def install_create_guard!(command)
@@ -971,10 +985,7 @@ module DiscussionBridgeGhost
           raise Error.new("identity_conflict")
         end
         guard = record("native_unknown_create", command_id)
-        required =
-          command.dig("identity", "native_id").nil? &&
-            state["pending_attempt"] && !state["completion"] &&
-            (!state["discovery"] || state.dig("discovery", "guard_required"))
+        required = unknown_create_guard_required?(command, state)
         unless if required
                  guard&.private_payload == create_guard_for(command)
                else
