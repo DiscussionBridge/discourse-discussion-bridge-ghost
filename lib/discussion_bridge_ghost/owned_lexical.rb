@@ -124,7 +124,23 @@ module DiscussionBridgeGhost
       check!(bytes.valid_encoding? && !bytes.start_with?("\uFEFF"))
       result = JSON.parse(bytes, object_class: WireJson::StrictObject)
       check!(result.is_a?(Hash) && finite?(result))
-      result
+      # StrictObject refuses duplicate assignments while parsing. Its purpose
+      # ends after validation: surgery needs an ordinary PRIVATE mutable tree,
+      # not removal/reinsertion that bypasses duplicate-key detection.
+      mutable_tree(result)
+    end
+
+    def mutable_tree(value)
+      case value
+      when Hash
+        value.each_with_object({}) do |(name, member), result|
+          result[name] = mutable_tree(member)
+        end
+      when Array
+        value.map { |member| mutable_tree(member) }
+      else
+        value
+      end
     end
 
     def finite?(value)
