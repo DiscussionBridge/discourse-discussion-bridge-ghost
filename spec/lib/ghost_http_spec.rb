@@ -114,7 +114,11 @@ RSpec.describe DiscussionBridgeGhost::GhostHttp do
   it "closes a TCP-created TLS-incomplete connection on the whole-operation deadline without retry" do
     # Execute the actual pinned Core/NetHTTP connect path, not WebMock's request
     # interception. TCP/TLS objects are synthetic; no DNS or socket is opened.
-    client = FinalDestination::HTTP.new("ghost-native.example", 443, nil)
+    # WebMock's class factory can return its Net::HTTP wrapper rather than the
+    # Core subclass. Keep this regression on the real filtered connect owner.
+    client = FinalDestination::HTTP.allocate
+    client.send(:initialize, "ghost-native.example", 443)
+    expect(client.method(:connect).owner).to eq(FinalDestination::HTTP)
     tcp = mock("synthetic TCP socket")
     tcp.stubs(:setsockopt)
     tcp.expects(:close).once
