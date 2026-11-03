@@ -34,6 +34,9 @@ module DiscussionBridgeGhost
       @protocol.validate!("Label", forum_name)
       @protocol.validate!("UUID", command_id)
       @source = article.source
+      native_binding_matches =
+        mapping.fetch("destination_native_id").nil? ||
+          fragment.native_id == mapping.fetch("destination_native_id")
       unless work.fetch("action") == "publish_revision" &&
                work.fetch("state") == "leased" &&
                work.fetch("lease_generation").positive? &&
@@ -46,10 +49,7 @@ module DiscussionBridgeGhost
                mapping.fetch("desired_source_revision") ==
                  @source.fetch("source_revision") &&
                fragment.resource_id == mapping.fetch("resource_id") &&
-               (
-                 mapping.fetch("destination_native_id").nil? ||
-                   fragment.native_id == mapping.fetch("destination_native_id")
-               )
+               native_binding_matches
         raise Error.new("identity_conflict")
       end
       @title = @source.fetch("title")

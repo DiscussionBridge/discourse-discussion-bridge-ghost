@@ -2,6 +2,7 @@
 
 require "rails_helper"
 require_relative "../../lib/discussion_bridge_ghost/native_publication"
+require_relative "../../lib/discussion_bridge_ghost/native_owned_command"
 
 RSpec.describe DiscussionBridgeGhost::NativePublication do
   let(:protocol) { DiscussionBridgeGhost::WireProtocol.new }
@@ -134,6 +135,56 @@ RSpec.describe DiscussionBridgeGhost::NativePublication do
     )
   end
 
+  it "feeds the actual owned-card validator without losing article markup or granting native ownership" do
+    value = prepare
+    fields = {
+      "title" => value.title,
+      "slug" => "article",
+      "status" => "draft",
+      "lexical" =>
+        DiscussionBridgeGhost::OwnedLexical.new(fragment: fragment).create(
+          value.html
+        ),
+      "tags" => [
+        {
+          "name" => "#discussionbridge-resource-#{mapping.fetch("resource_id")}"
+        }
+      ]
+    }
+    command = {
+      "command_id" => command_id,
+      "identity" => {
+        "resource_id" => mapping.fetch("resource_id"),
+        "kind" => "post",
+        "native_id" => nil
+      },
+      "owner" => {
+        "direction" => "from_discourse",
+        "action" => "create_draft",
+        "source_revision" => source.fetch("source_revision")
+      },
+      "baseline" => nil,
+      "candidate" => fields,
+      "request" => {
+        "maximum_bytes" => 1_048_576,
+        "body_bytes" => JSON.generate("posts" => [fields])
+      }
+    }
+    expect(
+      DiscussionBridgeGhost::NativeOwnedCommand.new(
+        command: command,
+        expected_mode: "simple"
+      ).validate!
+    ).to eq(true)
+    expect(
+      JSON
+        .parse(fields.fetch("lexical"))
+        .dig("root", "children")
+        .first
+        .fetch("html")
+    ).to eq(value.html)
+  end
+
   it "keeps output independent of later caller edits and omits an actually unknown source creation time" do
     source["source_created_at"] = nil
     value = prepare
@@ -191,6 +242,9 @@ RSpec.describe DiscussionBridgeGhost::NativePublication do
     }.to raise_error(DiscussionBridgeGhost::Error)
     expect {
       prepare(mapping: mapping.merge("destination_native_id" => "a" * 24))
+    }.to raise_error(DiscussionBridgeGhost::Error)
+    expect {
+      prepare(mapping: mapping.merge("mapping_state" => "withdrawn"))
     }.to raise_error(DiscussionBridgeGhost::Error)
   end
 
