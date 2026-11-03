@@ -105,4 +105,24 @@ RSpec.describe DiscussionBridgeGhost do
       )
     }.to raise_error(ActiveRecord::RecordInvalid)
   end
+
+  it "does not rebind a persisted installation to another connection, target or envelope identity" do
+    installation = fixture_installation
+    other_target =
+      DiscussionBridgeGhost::NativeTarget.create!(
+        public_id: SecureRandom.uuid,
+        ghost_origin: "https://other-ghost.example",
+        admin_origin: "https://other-admin.example"
+      )
+    {
+      connection_public_id: "dbc_#{SecureRandom.hex(12)}",
+      native_target_id: other_target.id,
+      public_id: SecureRandom.uuid
+    }.each do |field, value|
+      expect { installation.update!(field => value) }.to raise_error(
+        ActiveRecord::RecordInvalid
+      )
+      installation.reload
+    end
+  end
 end

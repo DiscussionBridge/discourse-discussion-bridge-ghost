@@ -68,6 +68,7 @@ RSpec.describe DiscussionBridgeGhost::MutationJournal do
   end
 
   def with_journal(app, secret: "SYNTHETIC-connection-secret-#{"x" * 20}")
+    @installation.reload
     DiscussionBridgeGhost::NativeLock.synchronize(
       @installation.native_target.public_id
     ) do |lease|
@@ -408,6 +409,43 @@ RSpec.describe DiscussionBridgeGhost::MutationJournal do
     end
     expect(received).to eq([rotated_secret])
     expect(@installation.mutations.sole.private_request).to eq(original)
+  end
+
+  it "does not replay retained work under another forum origin or native lock identity" do
+    app = ->(_env) { [204, {}, []] }
+    with_journal(app) do |journal|
+      journal.call("claim:original-realm", "V4-13") do
+        { "mutation_id" => SecureRandom.uuid }
+      end
+    end
+    retained = @installation.mutations.sole.request_ciphertext
+    original_forum = Discourse.base_url
+    calls = 0
+    Discourse.stubs(:base_url).returns("https://other-forum.example")
+    with_journal(
+      ->(_env) do
+        calls += 1
+        [204, {}, []]
+      end
+    ) do |journal|
+      expect { journal.call("claim:original-realm", "V4-13") }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+    end
+    Discourse.stubs(:base_url).returns(original_forum)
+    @target.update_columns(public_id: SecureRandom.uuid)
+    with_journal(
+      ->(_env) do
+        calls += 1
+        [204, {}, []]
+      end
+    ) do |journal|
+      expect { journal.call("claim:original-realm", "V4-13") }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+    end
+    expect(calls).to eq(0)
+    expect(@installation.mutations.sole.request_ciphertext).to eq(retained)
   end
 
   it "atomically rolls back receipt append and latest response while retaining committed intent" do
