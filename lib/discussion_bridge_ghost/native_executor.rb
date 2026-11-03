@@ -67,6 +67,32 @@ module DiscussionBridgeGhost
             maximum_bytes: command.dig("request", "maximum_bytes")
           )
         document.baseline_matches!(current)
+        matches =
+          client.find_by_resource(
+            command.dig("identity", "resource_id"),
+            maximum_bytes: command.dig("request", "maximum_bytes")
+          )
+        unless matches.length == 1 &&
+                 matches.first["id"] == current.fetch("id") &&
+                 matches.first["type"] == current.fetch("type")
+          raise Error.new("identity_conflict")
+        end
+        document.baseline_matches!(matches.first)
+        slugs = [current.fetch("slug"), command.dig("candidate", "slug")].uniq
+        slugs.each do |slug|
+          collisions =
+            client.find_by_slug(
+              slug,
+              maximum_bytes: command.dig("request", "maximum_bytes")
+            )
+          unique =
+            collisions.length == 1 &&
+              collisions.first["id"] == current.fetch("id") &&
+              collisions.first["type"] == current.fetch("type")
+          unless (slug == current.fetch("slug") ? unique : collisions.empty?)
+            raise Error.new("identity_conflict")
+          end
+        end
       elsif !client.find_by_resource(
             command.dig("identity", "resource_id"),
             maximum_bytes: command.dig("request", "maximum_bytes")
@@ -115,6 +141,7 @@ module DiscussionBridgeGhost
     # lock, even if receiver work now belongs to another generation. This does
     # not reuse that old generation for a new write or ACK.
     def recover(command_id)
+      @journal.reconcile_discovery!(command_id)
       retained = @journal.retained(command_id)
       if retained.dig("state", "completion")
         return retained.dig("state", "completion")

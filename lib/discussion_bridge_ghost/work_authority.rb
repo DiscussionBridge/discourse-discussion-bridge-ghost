@@ -72,6 +72,13 @@ module DiscussionBridgeGhost
                owner.fetch("move_id").nil? && owner.fetch("proof_nonce").nil?
         raise Error.new("work_authority_unavailable")
       end
+      if @initial_native_id &&
+           (
+             command.dig("identity", "native_id") != @initial_native_id ||
+               owner.fetch("action") == "create_draft"
+           )
+        raise Error.new("identity_conflict")
+      end
       # The initial native binding is nil throughout the draft/real-ID phase.
       # A locally discovered draft ID must not impersonate a receiver binding.
       guard!(operation: :mutate, native_id: @initial_native_id)

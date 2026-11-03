@@ -28,6 +28,8 @@ module DiscussionBridgeGhost
         "The Ghost publication fragment could not be verified. Preserve its content and retained history for reconciliation.",
       "native_effect_uncertain" =>
         "A retained Ghost write has no proven completion. Preserve it for reconciliation; do not repeat the write.",
+      "native_exclusion_pending" =>
+        "Retained Ghost exclusion records need local qualification before this target can accept new writes. Original work and receipts are preserved.",
       "native_representation_unavailable" =>
         "The required Ghost content parser is unavailable or incompatible. Reconciliation is required before continuing.",
       "identity_conflict" =>

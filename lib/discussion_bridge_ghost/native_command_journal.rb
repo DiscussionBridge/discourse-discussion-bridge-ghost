@@ -64,22 +64,44 @@ module DiscussionBridgeGhost
 
     attr_reader :context
 
-    def initialize(context:, now: -> { Time.now.utc })
+    def initialize(
+      context:,
+      now: -> { Time.now.utc },
+      history_installation: nil
+    )
       unless context.is_a?(ExecutionContext)
         raise Error.new("identity_conflict")
       end
       @context, @installation, @protocol, @now =
         context,
-        context.installation,
+        history_installation || context.installation,
         context.protocol,
         now
-      @binding = context.binding
+      if history_installation &&
+           (
+             !history_installation.is_a?(Installation) ||
+               history_installation.native_target_id !=
+                 context.installation.native_target_id
+           )
+        raise Error.new("identity_conflict")
+      end
+      @effect_context = history_installation.nil?
+      @binding =
+        context
+          .binding
+          .merge(
+            "installation_id" => @installation.public_id.dup.freeze,
+            "connection_id" => @installation.connection_public_id.dup.freeze
+          )
+          .freeze
       @attempt_http = {}
+      qualify_target_legacy! if @effect_context
     end
 
     # Retain exact bytes, complete baseline/candidate and original directional
     # provenance before an attempt. Reopening an ID never replaces its intent.
     def prepare(command_id:, identity:, owner:, request:, baseline:, candidate:)
+      assert_effect_context!
       uuid!(command_id)
       command =
         snapshot(
@@ -114,8 +136,14 @@ module DiscussionBridgeGhost
           raise Error.new("identity_conflict")
         end
         assert_claims_clear!(command.fetch("claims"))
+        assert_target_clear!
         create_record("native_command", command_id, command)
         create_record("native_progress", command_id, initial_state(command))
+        create_record(
+          "native_exclusion_enrollment",
+          command_id,
+          enrollment_for(command)
+        )
         command
           .fetch("claims")
           .each do |claim|
@@ -141,6 +169,7 @@ module DiscussionBridgeGhost
     # before effects. From WorkAuthority cannot authorize a To source move.
     # A crash after this commit is UNKNOWN until actual evidence is retained.
     def begin_attempt(command_id, http:)
+      assert_effect_context!
       unless http.is_a?(GhostHttp) &&
                http.bound_origin?(
                  protocol: @protocol,
@@ -154,12 +183,16 @@ module DiscussionBridgeGhost
           if state.fetch("pending_attempt") || state["completion"]
             raise Error.new("identity_conflict")
           end
+          assert_target_clear!(except_command: command_id)
           identity = {
             "command_id" => command_id,
             "attempt_id" => SecureRandom.uuid,
             "execution_id" => @context.execution_id
           }
           append(command, state, "attempt_started", identity)
+          if command.dig("identity", "native_id").nil?
+            install_create_guard!(command)
+          end
           snapshot(identity)
         end
       @attempt_http[attempt.fetch("attempt_id")] = http
@@ -172,6 +205,7 @@ module DiscussionBridgeGhost
     # Lost authority/lock or failed receipt commit leaves the started attempt
     # uncertain. Never manufacture no-send from a caller exception or status.
     def retain_dispatch(command_id, attempt:, http:, outcome:)
+      assert_effect_context!
       @context.commit do
         command, state = load_state(command_id)
         unless attempt.is_a?(Hash) &&
@@ -216,6 +250,13 @@ module DiscussionBridgeGhost
               }
         }
         append(command, state, "dispatch_observed", value)
+        if command.dig("identity", "native_id").nil?
+          if proof.value["phase"] == "not_sent"
+            remove_create_guard!(command)
+          elsif response
+            discover!(command, state, value.fetch("response"))
+          end
+        end
         snapshot(value)
       end
     end
@@ -224,6 +265,7 @@ module DiscussionBridgeGhost
     # drafts, empty lookups or matching source hashes do NOT prove that a delayed
     # earlier request cannot still arrive. No state release is derived here.
     def observe(command_id, value)
+      assert_effect_context!
       retained = snapshot(value)
       raise Error.new("identity_conflict") unless retained.is_a?(Hash)
       @context.commit do
@@ -239,11 +281,25 @@ module DiscussionBridgeGhost
       snapshot("command" => command, "state" => state, "response" => response)
     end
 
+    # Retry only the LOCAL reservation after a conflicting alias disappears.
+    # Reuse the retained genuine reply; no Ghost request or ownership is minted.
+    def reconcile_discovery!(command_id)
+      assert_effect_context!
+      @context.commit do
+        command, state, response = load_state(command_id)
+        if !state["completion"] && response &&
+             command.dig("identity", "native_id").nil?
+          discover!(command, state, response)
+        end
+      end
+    end
+
     # The immutable original command remains terminal forever. Remove only its
     # temporary exclusion rows after a checked terminal event is committed in
     # the SAME transaction. Ownership and URL reservations are not these rows.
     # Replaying an old completed ID cannot reconstruct or re-execute its write.
     def retain_completion(command_id, verifier:, evidence:)
+      assert_effect_context!
       unless verifier.is_a?(NativeEffectVerifier) &&
                verifier.context.equal?(@context)
         raise Error.new("identity_conflict")
@@ -254,29 +310,17 @@ module DiscussionBridgeGhost
         command, state, response = load_state(command_id)
         raise Error.new("identity_conflict") if state["completion"]
         validate_completion!(command, state, response, value)
-        # A draft create discovers an alias not present in original intent.
-        # Acquire it before recording completion; keep original native_id=nil.
-        native_claim = "native:#{value.fetch("native_id")}"
-        extra =
-          command.fetch("claims").include?(native_claim) ? [] : [native_claim]
-        assert_claims_clear!(extra) unless extra.empty?
-        extra.each do |claim|
-          create_record(
-            "native_barrier",
-            claim,
-            {
-              "format" => "ghost-native-barrier-1",
-              "binding" => @binding,
-              "command_id" => command_id,
-              "claim" => claim
-            }
-          )
+        if command.dig("identity", "native_id").nil? &&
+             (
+               state.dig("discovery", "native_id") !=
+                 value.fetch("native_id") ||
+                 state.dig("discovery", "guard_required") != false
+             )
+          raise Error.new("identity_conflict")
         end
         completion =
           snapshot(
-            value.merge(
-              "released_claims" => (command.fetch("claims") + extra).sort
-            )
+            value.merge("released_claims" => active_claims(command, state))
           )
         append(command, state, "effect_completed", completion)
         rows =
@@ -291,6 +335,7 @@ module DiscussionBridgeGhost
           raise Error.new("identity_conflict")
         end
         rows.delete_all
+        remove_create_guard!(command)
         completion
       end
     end
@@ -298,8 +343,10 @@ module DiscussionBridgeGhost
     # Ordinary To delivery/move writers must also consult this shared barrier.
     # No direction-specific authority is granted by finding the barrier clear.
     def assert_clear!(resource_id:, kind:, native_id:, slugs:)
+      assert_effect_context!
       @context.outside_transaction!
       @context.assert!
+      assert_target_clear!
       identity = {
         "resource_id" => resource_id,
         "kind" => kind,
@@ -380,7 +427,208 @@ module DiscussionBridgeGhost
       raise Error.new("identity_conflict"), cause: nil
     end
 
+    # Local historical qualification only. The real current context still owns
+    # the common target lock. No obsolete/foreign lease is reconstructed and no
+    # native or receiver request is sent, including for disabled installations.
+    def qualify_retained_exclusion!(id)
+      @context.commit do
+        row = record("native_command", id)
+        raise Error.new("identity_conflict") unless row
+        next if row.native_guard_version == 2
+        unless row.native_guard_version.nil?
+          raise Error.new("identity_conflict")
+        end
+        command, state, response = load_state(id)
+        if command.dig("identity", "native_id").nil? &&
+             state["pending_attempt"] && !state["completion"]
+          install_create_guard!(command)
+        end
+        enrollment = record("native_exclusion_enrollment", id)
+        if enrollment
+          unless enrollment.private_payload == enrollment_for(command)
+            raise Error.new("identity_conflict")
+          end
+        else
+          create_record(
+            "native_exclusion_enrollment",
+            id,
+            enrollment_for(command)
+          )
+        end
+        row.update!(native_guard_version: 2)
+        if response && !state["completion"] &&
+             command.dig("identity", "native_id").nil?
+          discover!(command, state, response)
+        end
+      end
+    end
+
     private
+
+    def assert_effect_context!
+      raise Error.new("identity_conflict") unless @effect_context
+    end
+
+    def target_records(kind)
+      installations =
+        Installation.where(
+          native_target_id: @installation.native_target_id
+        ).select(:id)
+      OperationalRecord.where(installation_id: installations, kind: kind)
+    end
+
+    def assert_target_clear!(except_command: nil)
+      if target_records("native_command").where(
+           "native_guard_version IS NULL OR native_guard_version <> ?",
+           2
+         ).exists?
+        raise Error.new("native_exclusion_pending")
+      end
+      scope = target_records("native_unknown_create")
+      if except_command
+        scope =
+          scope.where(
+            "NOT (installation_id = ? AND record_key = ?)",
+            @installation.id,
+            except_command
+          )
+      end
+      raise Error.new("native_effect_uncertain") if scope.exists?
+    end
+
+    def enrollment_for(command)
+      {
+        "format" => "ghost-native-exclusion-2",
+        "binding" => @binding,
+        "command_id" => command.fetch("command_id"),
+        "command_sha256" => Digest::SHA256.hexdigest(JSON.generate(command))
+      }
+    end
+
+    # Upgrade only local exclusion projections, never original command/event
+    # bytes or completed receipts. Bounded work and an indexed NULL locator keep
+    # legacy qualification out of the ordinary O(number-of-history) hot path.
+    # A history-only reader may qualify local projections for another installed
+    # connection sharing this locked physical target. It has no authority to
+    # dispatch, observe/rewrite ordinary history, ACK or use foreign credentials.
+    def qualify_target_legacy!
+      scope =
+        target_records("native_command").where(
+          "native_guard_version IS NULL OR native_guard_version <> ?",
+          2
+        )
+      scope
+        .limit(100)
+        .each do |row|
+          reader =
+            (
+              if row.installation_id == @installation.id
+                self
+              else
+                self.class.new(
+                  context: @context,
+                  now: @now,
+                  history_installation: row.installation
+                )
+              end
+            )
+          reader.qualify_retained_exclusion!(row.record_key)
+        end
+      raise Error.new("native_exclusion_pending") if scope.exists?
+    end
+
+    def create_guard_for(command)
+      {
+        "format" => "ghost-unknown-create-1",
+        "binding" => @binding,
+        "command_id" => command.fetch("command_id"),
+        "native_target_id" => @binding.fetch("native_target_id")
+      }
+    end
+
+    def install_create_guard!(command)
+      id = command.fetch("command_id")
+      row = record("native_unknown_create", id)
+      if row
+        unless row.private_payload == create_guard_for(command)
+          raise Error.new("identity_conflict")
+        end
+      else
+        create_record("native_unknown_create", id, create_guard_for(command))
+      end
+    end
+
+    def remove_create_guard!(command)
+      row = record("native_unknown_create", command.fetch("command_id"))
+      return unless row
+      unless row.private_payload == create_guard_for(command)
+        raise Error.new("identity_conflict")
+      end
+      row.delete
+    end
+
+    def active_claims(command, state)
+      (
+        command.fetch("claims") + Array(state.dig("discovery", "claims"))
+      ).uniq.sort
+    end
+
+    def discovery_for(command, response)
+      document = NativeDocument.new(command)
+      native =
+        document.response_object(
+          Base64.strict_decode64(response.fetch("body_base64"))
+        )
+      slug = native["slug"]
+      valid_slug =
+        slug.is_a?(String) && slug.bytesize.between?(1, 191) &&
+          /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/.match?(slug)
+      claims = ["native:#{native.fetch("id")}"]
+      claims << "slug:#{slug}" if valid_slug
+      {
+        "native_id" => native.fetch("id"),
+        "kind" => command.dig("identity", "kind"),
+        "slug" => valid_slug ? slug : nil,
+        "guard_required" => !valid_slug,
+        "claims" => (claims - command.fetch("claims")).sort
+      }
+    end
+
+    def discover!(command, state, response)
+      return if state["discovery"]
+      begin
+        value = discovery_for(command, response)
+      rescue Error, ArgumentError, KeyError
+        # The actual reply remains retained. Without a trustworthy identity and
+        # complete alias set, keep the target-wide unknown-create exclusion.
+        return
+      end
+      begin
+        assert_claims_clear!(value.fetch("claims"))
+      rescue Error => error
+        raise unless error.code == "identity_conflict"
+        unless state["discovery_conflict"] == value
+          append(command, state, "discovery_conflict", value)
+        end
+        return
+      end
+      value
+        .fetch("claims")
+        .each do |claim|
+          create_record(
+            "native_barrier",
+            claim,
+            {
+              "format" => "ghost-native-barrier-1",
+              "binding" => @binding,
+              "command_id" => command.fetch("command_id"),
+              "claim" => claim
+            }
+          )
+        end
+      append(command, state, "native_discovered", value)
+      remove_create_guard!(command) unless value.fetch("guard_required")
+    end
 
     def uuid!(value)
       unless value.is_a?(String) && SecretEnvelope::UUID.match?(value)
@@ -618,6 +866,7 @@ module DiscussionBridgeGhost
         record_key: key,
         mapping_public_id:
           kind == "native_command" ? value.dig("owner", "mapping_id") : nil,
+        native_guard_version: kind == "native_command" ? 2 : nil,
         encrypted_payload:
           @installation.envelope.encrypt(
             "operational_record",
@@ -642,7 +891,8 @@ module DiscussionBridgeGhost
 
     def load_state(command_id)
       uuid!(command_id)
-      command = record("native_command", command_id)&.private_payload
+      command_row = record("native_command", command_id)
+      command = command_row&.private_payload
       validate_command!(command, command_id)
       state = initial_state(command)
       response = nil
@@ -677,6 +927,12 @@ module DiscussionBridgeGhost
               event.fetch("value").except("released_claims")
             )
           end
+          if %w[native_discovered discovery_conflict].include?(event["kind"])
+            unless response &&
+                     event["value"] == discovery_for(command, response)
+              raise Error.new("identity_conflict")
+            end
+          end
           apply_event(state, event, command)
           if event["kind"] == "attempt_started"
             response = nil
@@ -692,9 +948,9 @@ module DiscussionBridgeGhost
         barriers =
           @installation.operational_records.where(
             kind: "native_barrier",
-            record_key: command.fetch("claims")
+            record_key: active_claims(command, state)
           )
-        unless barriers.count == command.fetch("claims").length &&
+        unless barriers.count == active_claims(command, state).length &&
                  barriers.all? { |row|
                    row.private_payload ==
                      {
@@ -704,6 +960,26 @@ module DiscussionBridgeGhost
                        "claim" => row.record_key
                      }
                  }
+          raise Error.new("identity_conflict")
+        end
+      end
+      if command_row.native_guard_version == 2
+        unless record(
+                 "native_exclusion_enrollment",
+                 command_id
+               )&.private_payload == enrollment_for(command)
+          raise Error.new("identity_conflict")
+        end
+        guard = record("native_unknown_create", command_id)
+        required =
+          command.dig("identity", "native_id").nil? &&
+            state["pending_attempt"] && !state["completion"] &&
+            (!state["discovery"] || state.dig("discovery", "guard_required"))
+        unless if required
+                 guard&.private_payload == create_guard_for(command)
+               else
+                 guard.nil?
+               end
           raise Error.new("identity_conflict")
         end
       end
@@ -794,14 +1070,31 @@ module DiscussionBridgeGhost
       when "native_observed"
         raise Error.new("identity_conflict") unless value.is_a?(Hash)
       when "effect_completed"
-        expected_claims =
-          (
-            command.fetch("claims") + ["native:#{value.fetch("native_id")}"]
-          ).uniq.sort
+        expected_claims = active_claims(command, state)
+        # Read already-completed older development history without rewriting it.
+        if command.dig("identity", "native_id").nil? && !state["discovery"]
+          expected_claims =
+            (expected_claims + ["native:#{value.fetch("native_id")}"]).uniq.sort
+        end
         unless value.fetch("released_claims") == expected_claims
           raise Error.new("identity_conflict")
         end
         state["completion"] = value
+      when "native_discovered", "discovery_conflict"
+        unless command.dig("identity", "native_id").nil? &&
+                 state["pending_attempt"] && state["dispatch_recorded"] &&
+                 state["discovery"].nil?
+          raise Error.new("identity_conflict")
+        end
+        state[
+          (
+            if event["kind"] == "native_discovered"
+              "discovery"
+            else
+              "discovery_conflict"
+            end
+          )
+        ] = value
       else
         raise Error.new("identity_conflict")
       end

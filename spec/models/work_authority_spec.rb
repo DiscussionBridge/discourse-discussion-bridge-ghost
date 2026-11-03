@@ -280,12 +280,331 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
   def owned_execution_html(fragment, command_id)
     attributes =
       fragment.attributes.merge(
-        "data-discussionbridge-source-revision" => @work.source_revision,
+        "data-discussionbridge-source-revision" =>
+          @work.source_revision || "prior-source-revision",
         "data-discussionbridge-mode" => "simple"
       )
     section =
       "<section #{attributes.map { |key, value| "#{key}=\"#{CGI.escapeHTML(value)}\"" }.join(" ")}><p>Native execution body.</p></section>"
     fragment.stamp_command(fragment.wrap(section), command_id: command_id)
+  end
+
+  def seed_native_binding!(withdraw: false)
+    with_runtime do |context, mutations|
+      authority(context, mutations, claim(context, mutations)).guard!(
+        operation: :mutate
+      )
+    end
+    @mapping.update!(destination_native_id: "a" * 24)
+    if withdraw
+      @work.update!(state: "cancelled")
+      config = @connection.cms_configuration.deep_dup
+      config.fetch("policy")["exclude_topic_ids"] = [@topic.id.to_s]
+      @connection.update_columns(cms_configuration: config)
+      @work =
+        DiscussionBridge::CmsWorkCoordinator.new(@connection).enqueue!(
+          @mapping,
+          source_snapshot: nil,
+          action: "withdraw"
+        )
+    else
+      @work = next_work!
+    end
+  end
+
+  def native_arguments(
+    context,
+    lease,
+    native_id: "a" * 24,
+    kind: "post",
+    create: false
+  )
+    id = SecureRandom.uuid
+    fragment =
+      DiscussionBridgeGhost::OwnedFragment.new(
+        resource_id: @record.resource_id,
+        kind: kind,
+        native_id: native_id || "pending",
+        nonce: "ab" * 32,
+        maximum_bytes: 262_144
+      )
+    old_html = owned_execution_html(fragment, SecureRandom.uuid)
+    baseline =
+      (
+        if create
+          nil
+        else
+          {
+            "id" => native_id,
+            "type" => kind,
+            "html" => old_html,
+            "lexical" =>
+              DiscussionBridgeGhost::OwnedLexical.new(
+                fragment: fragment
+              ).create(old_html),
+            "title" => "Owned native fixture",
+            "slug" => "article",
+            "status" => "published",
+            "updated_at" => "2026-11-03T16:00:00.000Z",
+            "tags" => [
+              {
+                "id" => "c" * 24,
+                "name" => "#discussionbridge-resource-#{@record.resource_id}"
+              }
+            ]
+          }
+        end
+      )
+    html = owned_execution_html(fragment, id)
+    lexical =
+      if create
+        DiscussionBridgeGhost::OwnedLexical.new(fragment: fragment).create(html)
+      else
+        DiscussionBridgeGhost::OwnedLexical.new(fragment: fragment).replace(
+          current: baseline,
+          html: html,
+          expected_revision: baseline.fetch("updated_at"),
+          baseline_sha256: fragment.extract(old_html).sha256
+        )
+      end
+    action =
+      (
+        if create
+          "create_draft"
+        else
+          (@work.action == "withdraw" ? "withdraw" : "publish")
+        end
+      )
+    fields = {
+      "title" => "Owned native fixture",
+      "slug" => "article",
+      "status" => action == "publish" ? "published" : "draft",
+      "lexical" => lexical
+    }
+    if create
+      fields["tags"] = [
+        { "name" => "#discussionbridge-resource-#{@record.resource_id}" }
+      ]
+    else
+      fields.merge!(
+        "id" => native_id,
+        "updated_at" => baseline.fetch("updated_at")
+      )
+    end
+    [
+      {
+        command_id: id,
+        identity: {
+          "resource_id" => @record.resource_id,
+          "kind" => kind,
+          "native_id" => native_id
+        },
+        owner: {
+          "direction" => "from_discourse",
+          "action" => action,
+          "mapping_id" => @mapping.mapping_id,
+          "work_id" => @work.work_id,
+          "generation" => lease.fetch("lease_generation"),
+          "source_revision" => @work.source_revision,
+          "external_id" => @binding.external_id,
+          "move_id" => nil,
+          "proof_nonce" => nil
+        },
+        request: {
+          "method" => create ? "POST" : "PUT",
+          "path" =>
+            "/ghost/api/admin/#{kind}s/#{create ? "" : "#{native_id}/"}",
+          "body_bytes" => JSON.generate("#{kind}s" => [fields]),
+          "maximum_bytes" => 262_144,
+          "allowed_statuses" => create ? [201] : [200]
+        },
+        baseline: baseline,
+        candidate: fields
+      },
+      html
+    ]
+  end
+
+  %w[
+    wrong-native
+    replacement-create
+    missing-native
+    wrong-kind
+  ].each do |scenario|
+    it "rejects #{scenario} before native writes on an existing receiver binding" do
+      seed_native_binding!
+      with_runtime do |context, mutations|
+        lease = claim(context, mutations, key: "claim:#{scenario}")
+        held = authority(context, mutations, lease)
+        create = scenario == "replacement-create"
+        id = create ? nil : (scenario == "wrong-native" ? "b" * 24 : "a" * 24)
+        kind = scenario == "wrong-kind" ? "page" : "post"
+        args, _html =
+          native_arguments(
+            context,
+            lease,
+            native_id: id,
+            kind: kind,
+            create: create
+          )
+        native_journal =
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+        native_journal.prepare(**args)
+        if %w[missing-native wrong-kind].include?(scenario)
+          stub_request(
+            :get,
+            %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/#{kind}s/#{id}/}
+          ).to_return(
+            status: 404,
+            headers: {
+              "Content-Type" => "application/json"
+            },
+            body: '{"errors":[]}'
+          )
+        end
+        executor =
+          DiscussionBridgeGhost::NativeExecutor.new(
+            context: context,
+            journal: native_journal,
+            authority: held,
+            api_key: "a" * 24 + ":" + "12" * 32
+          )
+        expect { executor.execute(args.fetch(:command_id)) }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+        expect(@mapping.reload.destination_native_id).to eq("a" * 24)
+        expect(
+          native_journal.retained(args.fetch(:command_id)).dig(
+            "state",
+            "pending_attempt"
+          )
+        ).to eq(nil)
+      end
+      expect(
+        a_request(
+          :post,
+          %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/}
+        )
+      ).not_to have_been_made
+      expect(
+        a_request(
+          :put,
+          %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/}
+        )
+      ).not_to have_been_made
+    end
+  end
+
+  %w[
+    unique-post
+    unique-page
+    withdraw
+    duplicate-resource
+    lost-resource
+    slug-conflict
+  ].each do |scenario|
+    it "enforces current preflight for #{scenario} under actual bound V4 work" do
+      seed_native_binding!(withdraw: scenario == "withdraw")
+      with_runtime do |context, mutations|
+        lease = claim(context, mutations, key: "claim:preflight:#{scenario}")
+        held = authority(context, mutations, lease)
+        kind = scenario == "unique-page" ? "page" : "post"
+        args, html = native_arguments(context, lease, kind: kind)
+        native_journal =
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+        native_journal.prepare(**args)
+        native = args.fetch(:baseline)
+        origin = @target.admin_origin
+        stub_request(
+          :get,
+          %r{#{Regexp.escape(origin)}/ghost/api/admin/#{kind}s/#{native.fetch("id")}/}
+        ).to_return do
+          {
+            status: 200,
+            headers: {
+              "Content-Type" => "application/json"
+            },
+            body: JSON.generate("#{kind}s" => [native])
+          }
+        end
+        %w[post page].each do |queried|
+          stub_request(
+            :get,
+            %r{#{Regexp.escape(origin)}/ghost/api/admin/#{queried}s/\?filter=}
+          ).to_return do
+            values = queried == kind ? [native] : []
+            values = [] if scenario == "lost-resource"
+            values = [
+              native.merge("id" => "b" * 24, "type" => queried)
+            ] if scenario == "duplicate-resource" && queried != kind
+            {
+              status: 200,
+              headers: {
+                "Content-Type" => "application/json"
+              },
+              body: JSON.generate("#{queried}s" => values)
+            }
+          end
+          stub_request(
+            :get,
+            %r{#{Regexp.escape(origin)}/ghost/api/admin/#{queried}s/\?filter=slug}
+          ).to_return do
+            values = queried == kind ? [native] : []
+            values = [
+              native.merge("id" => "b" * 24, "type" => queried)
+            ] if scenario == "slug-conflict" && queried != kind
+            {
+              status: 200,
+              headers: {
+                "Content-Type" => "application/json"
+              },
+              body: JSON.generate("#{queried}s" => values)
+            }
+          end
+        end
+        update =
+          stub_request(:put, origin + args.dig(:request, "path")).to_return do
+            native =
+              native.merge(args.fetch(:candidate)).merge(
+                "html" => html,
+                "updated_at" => "2026-11-03T16:00:01.000Z"
+              )
+            {
+              status: 200,
+              headers: {
+                "Content-Type" => "application/json"
+              },
+              body: JSON.generate("#{kind}s" => [native])
+            }
+          end
+        executor =
+          DiscussionBridgeGhost::NativeExecutor.new(
+            context: context,
+            journal: native_journal,
+            authority: held,
+            api_key: "a" * 24 + ":" + "12" * 32
+          )
+        if %w[unique-post unique-page withdraw].include?(scenario)
+          expect(
+            executor.execute(args.fetch(:command_id)).dig("native", "id")
+          ).to eq("a" * 24)
+          expect(update).to have_been_requested.once
+        else
+          expect { executor.execute(args.fetch(:command_id)) }.to raise_error(
+            DiscussionBridgeGhost::Error
+          )
+          expect(update).not_to have_been_requested
+          expect(
+            native_journal.retained(args.fetch(:command_id)).dig(
+              "state",
+              "pending_attempt"
+            )
+          ).to eq(nil)
+        end
+        expect(@mapping.reload.destination_native_id).to eq("a" * 24)
+        expect(@work.reload.state).to eq("leased")
+      end
+    end
   end
 
   it "executes durable pending-draft and real-ID publish bytes under actual V4 authority without acknowledging receiver work" do
@@ -398,13 +717,18 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         stub_request(
           :get,
           %r{#{Regexp.escape(origin)}/ghost/api/admin/#{kind}s/\?filter=slug}
-        ).to_return(
-          status: 200,
-          headers: {
-            "Content-Type" => "application/json"
-          },
-          body: JSON.generate("#{kind}s" => [])
-        )
+        ).to_return do
+          {
+            status: 200,
+            headers: {
+              "Content-Type" => "application/json"
+            },
+            body:
+              JSON.generate(
+                "#{kind}s" => (kind == "post" && created ? [native] : [])
+              )
+          }
+        end
       end
       executor =
         DiscussionBridgeGhost::NativeExecutor.new(
