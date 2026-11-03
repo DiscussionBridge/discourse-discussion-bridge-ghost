@@ -87,15 +87,12 @@ module DiscussionBridgeGhost
       selected_field = kind == "authors" ? "status" : "slug"
       ids =
         items.map do |item|
-          unless item.is_a?(Hash) && item["id"].is_a?(String) &&
-                   /\A[a-f0-9]{24}\z/.match?(item["id"]) &&
-                   item["name"].is_a?(String) &&
-                   (
-                     !item.key?(selected_field) ||
-                       item[selected_field].is_a?(String)
-                   )
-            raise Error.new("response_invalid")
-          end
+          valid_item =
+            item.is_a?(Hash) && item["id"].is_a?(String) &&
+              /\A[a-f0-9]{24}\z/.match?(item["id"]) &&
+              item["name"].is_a?(String) &&
+              (!item.key?(selected_field) || item[selected_field].is_a?(String))
+          raise Error.new("response_invalid") unless valid_item
           item["id"]
         end
       if items.length > pagination["total"] ||
