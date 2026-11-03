@@ -12,11 +12,14 @@ module DiscussionBridgeGhost
   class MutationJournal
     include ProtectedDiagnostics
 
+    attr_reader :context
+
     def initialize(
       installation:,
       protocol:,
       transport:,
       lease:,
+      context: nil,
       now: -> { Time.now.utc }
     )
       unless transport.is_a?(RackTransport) &&
@@ -33,9 +36,24 @@ module DiscussionBridgeGhost
         transport,
         lease,
         now
-      @revision = installation.configuration_revision
-      @target_id = installation.native_target_id
-      @binding = current_binding
+      @context =
+        context ||
+          ExecutionContext.new(
+            installation: installation,
+            protocol: protocol,
+            transport: transport,
+            lease: lease
+          )
+      unless @context.is_a?(ExecutionContext) &&
+               @context.bound_to?(
+                 installation: installation,
+                 protocol: protocol,
+                 transport: transport,
+                 lease: lease
+               )
+        raise Error.new("identity_conflict")
+      end
+      @binding = @context.binding
     end
 
     def call(operation_key, route_id, path: {}, retained_body: nil, &make_body)
@@ -97,40 +115,11 @@ module DiscussionBridgeGhost
     private
 
     def assert_current!
-      @lease.assert!
-      @installation.assert_enabled!(expected_revision: @revision)
-      unless @installation.native_target_id == @target_id
-        raise Error.new("identity_conflict")
-      end
-      raise Error.new("identity_conflict") unless current_binding == @binding
+      @context.assert!
     end
 
     def assert_no_transaction!
-      if @installation
-           .class
-           .connection_pool
-           .active_connection?
-           &.transaction_open?
-        raise Error.new("transaction_open")
-      end
-    end
-
-    def current_binding
-      # Keep execution identity, not credential material/revision. A same-site,
-      # same-connection credential rotation may authenticate the retained exact
-      # request again; another connection/site must never inherit its history.
-      target = @installation.native_target.reload
-      {
-        "format" => "ghost-journal-identity-1",
-        "installation_id" => @installation.public_id,
-        "connection_id" => @installation.connection_public_id,
-        "forum_origin" => Discourse.base_url,
-        "native_target_id" => target.public_id,
-        "ghost_origin" => target.ghost_origin,
-        "admin_origin" => target.admin_origin,
-        "normative_sha256" => WireProtocol::NORMATIVE_SHA256,
-        "schema_sha256" => WireProtocol::SCHEMA_SHA256
-      }.transform_values { |value| value.dup.freeze }.freeze
+      @context.outside_transaction!
     end
 
     def prepare(key, route_id, path, retained_body, make_body)

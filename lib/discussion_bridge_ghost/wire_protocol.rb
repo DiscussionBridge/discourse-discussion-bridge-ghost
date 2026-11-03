@@ -280,6 +280,22 @@ module DiscussionBridgeGhost
       raise Error.new("configuration_invalid"), cause: nil
     end
 
+    # Validation is not authority. Work helpers still use actual current routes
+    # and receiver token proof rather than treating a parsed object as a lease.
+    def validate!(type, value)
+      @codec.validate!(type, value)
+      value
+    rescue @codec::Error
+      raise Error.new("response_invalid"), cause: nil
+    end
+
+    def url_origin_key(value)
+      @codec.validate!("Url", value)
+      @codec.url_authority(value).comparison_origin
+    rescue @codec::Error
+      raise Error.new("response_invalid"), cause: nil
+    end
+
     private
 
     def route!(id)

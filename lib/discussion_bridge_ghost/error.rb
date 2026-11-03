@@ -29,6 +29,10 @@ module DiscussionBridgeGhost
       "identity_conflict" =>
         "Retained identity or request history requires reconciliation.",
       "disabled" => "This Ghost connector installation is disabled.",
+      "work_authority_unavailable" =>
+        "Current publication authority could not be verified. Preserve the retained work and receipts before retrying.",
+      "work_renewal_pending" =>
+        "The retained publication lease renewal has not succeeded. Honor its recorded retry or resolve the refusal before continuing.",
       "transaction_open" =>
         "Ghost synchronization requires a committed boundary outside an enclosing database transaction."
     }.freeze

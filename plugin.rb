@@ -39,11 +39,13 @@ after_initialize do
     wire_json
     wire_protocol
     rack_transport
+    execution_context
     mutation_journal
     ghost_http
     ghost_admin_client
     owned_fragment
     owned_lexical
+    work_authority
   ].each { |name| require_relative "lib/discussion_bridge_ghost/#{name}" }
   %w[native_target installation operational_record mutation].each do |name|
     require_relative "app/models/discussion_bridge_ghost/#{name}"
