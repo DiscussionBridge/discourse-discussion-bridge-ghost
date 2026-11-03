@@ -39,12 +39,12 @@ end
 #
 #  id                :bigint           not null, primary key
 #  encrypted_payload :text             not null
-#  mapping_public_id :uuid
 #  kind              :string           not null
 #  record_key        :text             not null
 #  created_at        :datetime         not null
 #  updated_at        :datetime         not null
 #  installation_id   :bigint           not null
+#  mapping_public_id :uuid
 #
 # Indexes
 #

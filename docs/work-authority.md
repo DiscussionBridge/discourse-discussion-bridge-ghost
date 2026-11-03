@@ -49,7 +49,7 @@ and an index on installation/kind/locator. New work/fence rows set it on creatio
 normal updates cannot rebind it. The locator is not authorization and must agree
 with the encrypted identity whenever read. Ordinary missing-fence lookup reads
 only matching indexed history plus legacy NULL locators, in 100-row batches.
-Legacy ciphertext and locator values remain unchanged: there is no automatic
+History lookup leaves legacy ciphertext and locator values unchanged: there is no automatic
 backfill, repair, counter reset or new history. Ambiguous malformed legacy rows
 stop for reconciliation. Valid history for a different mapping does not imply
 that this mapping's fence is missing. Fresh current receiver proof remains
