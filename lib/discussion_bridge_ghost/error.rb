@@ -26,6 +26,8 @@ module DiscussionBridgeGhost
       "native_lock_lost" => "The Ghost native writer no longer owns its lock.",
       "native_fragment_invalid" =>
         "The Ghost publication fragment could not be verified. Preserve its content and retained history for reconciliation.",
+      "native_effect_uncertain" =>
+        "A retained Ghost write has no proven completion. Preserve it for reconciliation; do not repeat the write.",
       "native_representation_unavailable" =>
         "The required Ghost content parser is unavailable or incompatible. Reconciliation is required before continuing.",
       "identity_conflict" =>

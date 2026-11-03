@@ -317,13 +317,11 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
           api_key: "a" * 24 + ":" + "12" * 32
         )
       expect { executor.recover(args.fetch(:command_id)) }.to raise_error(
-        DiscussionBridgeGhost::Error,
-        "native_effect_uncertain"
-      )
+        DiscussionBridgeGhost::Error
+      ) { |error| expect(error.code).to eq("native_effect_uncertain") }
       expect { executor.execute(args.fetch(:command_id)) }.to raise_error(
-        DiscussionBridgeGhost::Error,
-        "native_effect_uncertain"
-      )
+        DiscussionBridgeGhost::Error
+      ) { |error| expect(error.code).to eq("native_effect_uncertain") }
       expect(
         journal.retained(args.fetch(:command_id)).dig("state", "completion")
       ).to eq(nil)
@@ -372,27 +370,25 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
           journal: journal,
           api_key: "a" * 24 + ":" + "12" * 32
         )
-      scope = @installation.operational_records
-      allow(scope).to receive(:create!).and_wrap_original do |original, *values|
-        result = original.call(*values)
-        if values.first[:kind] == "native_event" &&
-             result.private_payload["kind"] == "effect_completed"
-          raise DiscussionBridgeGhost::Error.new(
-                  "SYNTHETIC-local-commit-failure"
-                )
+      injected = false
+      fault =
+        TracePoint.new(:return) do |event|
+          if event.self.equal?(journal) && event.method_id == :append &&
+               event.binding.local_variable_get(:kind) == "effect_completed"
+            injected = true
+            raise DiscussionBridgeGhost::Error.new("identity_conflict")
+          end
         end
-        result
-      end
-      expect { executor.recover(args.fetch(:command_id)) }.to raise_error(
-        DiscussionBridgeGhost::Error
-      )
+      expect {
+        fault.enable { executor.recover(args.fetch(:command_id)) }
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(injected).to eq(true)
       expect(
         journal.retained(args.fetch(:command_id)).dig("state", "completion")
       ).to eq(nil)
       expect(
         @installation.operational_records.where(kind: "native_barrier").count
       ).to eq(2)
-      allow(scope).to receive(:create!).and_call_original
       expect(
         executor.recover(args.fetch(:command_id)).fetch("native_id")
       ).to eq(native.fetch("id"))
@@ -432,6 +428,150 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
       expect(
         journal.retained(args.fetch(:command_id)).dig("state", "completion")
       ).to eq(nil)
+    end
+  end
+
+  it "does not accept manufactured verifier evidence or a response different from the retained genuine dispatch" do
+    args = arguments
+    with_journal do |journal, context|
+      _command, native = completed_response(journal, context, args)
+      stub_native_reads(args, native)
+      retained = journal.retained(args.fetch(:command_id))
+      verifier =
+        DiscussionBridgeGhost::NativeEffectVerifier.new(
+          context: context,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      proof =
+        verifier.verify(
+          command: retained.fetch("command"),
+          response: retained.fetch("response")
+        )
+      copy =
+        DiscussionBridgeGhost::NativeEffectVerifier::Evidence.new(
+          value: proof.value
+        )
+      expect {
+        journal.retain_completion(
+          args.fetch(:command_id),
+          verifier: verifier,
+          evidence: copy
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      changed =
+        retained.fetch("response").merge(
+          "body_base64" =>
+            Base64.strict_encode64(
+              " #{Base64.strict_decode64(retained.dig("response", "body_base64"))}"
+            )
+        )
+      different =
+        verifier.verify(command: retained.fetch("command"), response: changed)
+      expect {
+        journal.retain_completion(
+          args.fetch(:command_id),
+          verifier: verifier,
+          evidence: different
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(
+        journal.retained(args.fetch(:command_id)).dig("state", "completion")
+      ).to eq(nil)
+      expect(
+        journal.retain_completion(
+          args.fetch(:command_id),
+          verifier: verifier,
+          evidence: proof
+        ).fetch("native_id")
+      ).to eq(native.fetch("id"))
+    end
+  end
+
+  it "keeps terminal history valid after a later command reuses temporary claims, and detects a lost completion tail" do
+    args = arguments
+    with_journal do |journal, context|
+      _command, native = completed_response(journal, context, args)
+      old_progress =
+        row("native_progress", args.fetch(:command_id)).encrypted_payload
+      stub_native_reads(args, native)
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: journal,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      completion = executor.recover(args.fetch(:command_id))
+      later = arguments(action: "publish")
+      later[:identity]["resource_id"] = args.dig(:identity, "resource_id")
+      journal.prepare(**later)
+      expect(
+        journal.retained(args.fetch(:command_id)).dig("state", "completion")
+      ).to eq(completion)
+      event =
+        @installation
+          .operational_records
+          .where(kind: "native_event")
+          .where("record_key LIKE ?", "#{args.fetch(:command_id)}:%")
+          .order(:record_key)
+          .last
+      event.delete
+      row("native_progress", args.fetch(:command_id)).update!(
+        encrypted_payload: old_progress
+      )
+      expect { journal.retained(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+    end
+  end
+
+  it "records physical withdrawal with its original null revision but does not grant new publication authority" do
+    args = arguments(action: "withdraw")
+    args[:baseline]["lexical"] = '{"root":{"children":[]}}'
+    with_journal do |journal, context|
+      command = journal.prepare(**args)
+      native =
+        args
+          .fetch(:baseline)
+          .merge(args.fetch(:candidate))
+          .merge("type" => "post", "updated_at" => "2026-11-03T10:01:00.000Z")
+      post =
+        stub_request(
+          :put,
+          @installation.native_target.admin_origin + args.dig(:request, "path")
+        ).to_return(
+          status: 200,
+          headers: {
+            "Content-Type" => "application/json"
+          },
+          body: JSON.generate("posts" => [native])
+        )
+      http = native_http(context)
+      attempt = journal.begin_attempt(args.fetch(:command_id), http: http)
+      result = send_command(http, command, attempt)
+      journal.retain_dispatch(
+        args.fetch(:command_id),
+        attempt: attempt,
+        http: http,
+        outcome: result
+      )
+      stub_native_reads(args, native)
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: journal,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      expect(
+        executor.recover(args.fetch(:command_id)).dig("native", "status")
+      ).to eq("draft")
+      expect(
+        journal.retained(args.fetch(:command_id)).dig(
+          "command",
+          "owner",
+          "source_revision"
+        )
+      ).to eq(nil)
+      expect(post).to have_been_requested.once
     end
   end
 

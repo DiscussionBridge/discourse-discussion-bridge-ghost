@@ -14,16 +14,12 @@ module DiscussionBridgeGhost
     include ProtectedDiagnostics
 
     def initialize(context:, journal:, api_key:, authority: nil, factory: nil)
+      valid_authority =
+        authority.nil? ||
+          (authority.is_a?(WorkAuthority) && authority.bound_to?(context))
       unless context.is_a?(ExecutionContext) &&
                journal.is_a?(NativeCommandJournal) &&
-               journal.context.equal?(context) &&
-               (
-                 authority.nil? ||
-                   (
-                     authority.is_a?(WorkAuthority) &&
-                       authority.bound_to?(context)
-                   )
-               )
+               journal.context.equal?(context) && valid_authority
         raise Error.new("identity_conflict")
       end
       @context, @journal, @api_key, @authority, @factory =
