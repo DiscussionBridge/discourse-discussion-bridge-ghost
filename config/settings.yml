@@ -1,0 +1,4 @@
+plugins:
+  discussion_bridge_ghost_enabled:
+    default: false
+    client: false

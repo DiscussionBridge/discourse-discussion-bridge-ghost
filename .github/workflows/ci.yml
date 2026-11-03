@@ -1,0 +1,28 @@
+name: Ghost connector development
+
+on:
+  push:
+    branches:
+      - main
+      - 'codex/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  foundation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container: discourse/discourse_test@sha256:5df460f3592a1adacc924775b6c690191572d8efe9e51d3f823c38c092d9f6a3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check every Ruby source parses
+        run: find lib app db test -type f -name '*.rb' -print0 | xargs -0 -n1 ruby -c
+      - name: Run isolated synthetic foundation tests
+        run: ruby test/foundation_test.rb
+      - name: Verify unfinished package and protocol identities
+        run: ruby scripts/check-development.rb

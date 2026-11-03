@@ -1,0 +1,6 @@
+/.bundle/
+/vendor/bundle/
+/.artifacts/
+/tmp/
+/coverage/
+/node_modules/

@@ -1,0 +1,6 @@
+en:
+  site_settings:
+    discussion_bridge_ghost_enabled: "Enable the optional DiscussionBridge Ghost connector on this Discourse installation."
+  discussion_bridge_ghost:
+    title: "DiscussionBridge for Ghost"
+    unfinished: "This development candidate is not qualified for installation yet."
