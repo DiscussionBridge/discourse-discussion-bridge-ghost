@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "rails_helper"
+require "cgi"
 require_relative "../../lib/discussion_bridge_ghost/native_article"
 
 RSpec.describe DiscussionBridgeGhost::NativeArticle do
@@ -203,6 +204,44 @@ RSpec.describe DiscussionBridgeGhost::NativeArticle do
       '<img src="/upload.png ">'
     ].each do |html|
       expect { prepare(html) }.to raise_error(described_class::Limitation)
+    end
+  end
+
+  it "preserves browser targets across mixed encoded and ordinary dot segments in links, images and srcset" do
+    cases = [
+      %w[%2e%2e/../next https://forum.example/next],
+      %w[%2e/../next https://forum.example/t/next],
+      %w[x/%2e%2e/../next https://forum.example/t/next],
+      %w[.%2e/../next https://forum.example/next],
+      %w[%2e./../next https://forum.example/next],
+      %w[%2E%2e/../next https://forum.example/next],
+      %w[x/%2E./../next https://forum.example/t/next],
+      %w[
+        %2E/../next?value=%2e%2e/../#.%2e
+        https://forum.example/t/next?value=%2e%2e/../#.%2e
+      ],
+      %w[x/%252e/../next https://forum.example/t/source-article/x/next],
+      %w[/x/%2e%2e/../next https://forum.example/next],
+      %w[//cdn.example/a/%2e%2e/../next https://cdn.example/next],
+      %w[//cdn.example//next https://cdn.example//next],
+      %w[//cdn.example///next https://cdn.example///next],
+      %w[//cdn.example/a/..//next https://cdn.example//next],
+      %w[//bücher.example/a/%2e/../next https://xn--bcher-kva.example/next]
+    ]
+    cases.each do |reference, expected|
+      escaped = CGI.escapeHTML(reference)
+      html =
+        "<p><a href=\"#{escaped}\">Target</a><img alt=\"Source image\" src=\"#{escaped}\" srcset=\"#{escaped} 1x\"></p>"
+      original = html.dup
+      record = source(html)
+      article = prepare(html, record: record)
+      root = Nokogiri::HTML5.fragment(article.html)
+      expect(root.at_css("a")["href"]).to eq(expected), reference
+      expect(root.at_css("img")["src"]).to eq(expected), reference
+      expect(root.at_css("img")["srcset"]).to eq("#{expected} 1x"), reference
+      expect(article.original_html).to eq(original)
+      expect(article.source).to eq(record)
+      expect(html).to eq(original)
     end
   end
 end

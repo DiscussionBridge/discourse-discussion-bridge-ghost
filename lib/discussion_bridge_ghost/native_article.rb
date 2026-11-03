@@ -239,12 +239,15 @@ module DiscussionBridgeGhost
         if value.match?(/\A[a-z][a-z0-9+.-]*:/i)
           value
         elsif value.start_with?("//")
-          absolute = "https:#{value}"
-          before_fragment = absolute.split("#", 2).first
-          origin = @protocol.url_origin_key(before_fragment)
-          origin + escape_reference(absolute.sub(%r{\Ahttps://[^/?#]+}, ""))
+          authority = value[%r{\A//[^/?#]*}]
+          origin = @protocol.origin_key("https:#{authority}")
+          reference = escape_reference(value[authority.length..])
+          # This suffix is already a PATH on the verified authority. A leading
+          # // must not become a second authority when passed to URI.join.
+          reference = ".#{reference}" if reference.start_with?("/")
+          URI.join("#{origin}/", browser_path_reference(reference)).to_s
         else
-          URI.join(@base, escape_reference(value)).to_s
+          URI.join(@base, browser_path_reference(escape_reference(value))).to_s
         end
       # These are browser references, never server fetch authority. Restrict the
       # actual target, not just the spelling seen by the sanitizer. Retain the
@@ -253,6 +256,23 @@ module DiscussionBridgeGhost
       result
     rescue Error, URI::Error, ArgumentError
       raise Limitation.new(functions: ["source reference target"]), cause: nil
+    end
+
+    # HTTPS browser paths treat these percent-encoded spellings as dot segments
+    # before shortening the path stack. RFC URI.join does not. Normalize ONLY
+    # whole path segments before joining, while original syntax is still known;
+    # never decode general escapes, query values, fragments or stored identities.
+    def browser_path_reference(value)
+      path, separator, suffix = value.partition(/[?#]/)
+      normalized =
+        path
+          .split("/", -1)
+          .map do |segment|
+            dots = segment.gsub(/%2e/i, ".")
+            dots == "." || dots == ".." ? dots : segment
+          end
+          .join("/")
+      normalized + separator + suffix
     end
 
     def anchor_srcset(value)
