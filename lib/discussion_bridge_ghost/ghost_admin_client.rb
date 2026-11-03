@@ -68,7 +68,9 @@ module DiscussionBridgeGhost
           maximum_bytes
         )
       items = data[resource]
-      pagination = data.dig("meta", "pagination")
+      meta = data["meta"]
+      raise Error.new("response_invalid") unless meta.is_a?(Hash)
+      pagination = meta["pagination"]
       valid_page =
         items.is_a?(Array) && items.length <= 100 && pagination.is_a?(Hash) &&
           pagination["page"].is_a?(Integer) && pagination["page"] == page &&
@@ -82,11 +84,16 @@ module DiscussionBridgeGhost
               )
           )
       raise Error.new("response_invalid") unless valid_page
+      selected_field = kind == "authors" ? "status" : "slug"
       ids =
         items.map do |item|
           unless item.is_a?(Hash) && item["id"].is_a?(String) &&
                    /\A[a-f0-9]{24}\z/.match?(item["id"]) &&
-                   item["name"].is_a?(String)
+                   item["name"].is_a?(String) &&
+                   (
+                     !item.key?(selected_field) ||
+                       item[selected_field].is_a?(String)
+                   )
             raise Error.new("response_invalid")
           end
           item["id"]
@@ -100,7 +107,7 @@ module DiscussionBridgeGhost
         kind == "authors" ? %w[id name status] : %w[id name slug]
       {
         "items" => items.map { |item| item.slice(*selected_fields) },
-        "pagination" => pagination
+        "pagination" => pagination.slice("page", "total", "next")
       }
     end
 

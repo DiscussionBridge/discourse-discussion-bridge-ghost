@@ -360,4 +360,91 @@ class GhostNativeHttpTest < Minitest::Test
     assert_equal %w[id name status], value.fetch("items").first.keys.sort
     refute_includes JSON.generate(value), "private@example"
   end
+
+  def test_deadline_traverses_standard_error_connection_setup_cleanup
+    http = transport(Incoming.new, deadline_seconds: 0.02)
+    setup_closed = false
+    @connection.define_singleton_method(:start) do
+      begin
+        sleep 0.1
+      rescue StandardError
+        setup_closed = true
+        raise
+      end
+    end
+    error =
+      assert_raises(DiscussionBridgeGhost::GhostHttp::Failure) do
+        http.request(
+          "GET",
+          "/ghost/api/admin/posts/",
+          maximum_bytes: 100,
+          authenticated: true
+        )
+      end
+    assert setup_closed, "Cancellation must reach pre-session socket cleanup"
+    assert_nil error.cause
+    assert_empty @connection.requests
+  end
+
+  def catalog(kind, payload)
+    DiscussionBridgeGhost::GhostAdminClient.new(
+      http: ReadTransport.new { |_path| JSON.generate(payload) }
+    ).catalog_page(kind, page: 1)
+  end
+
+  def test_catalog_rejects_missing_or_non_object_metadata_and_pagination
+    [nil, "private scalar", [], 3, true].each do |value|
+      [
+        { "users" => [], "meta" => value },
+        { "users" => [], "meta" => { "pagination" => value } }
+      ].each do |payload|
+        error =
+          assert_raises(DiscussionBridgeGhost::Error) do
+            catalog("authors", payload)
+          end
+        assert_equal "response_invalid", error.code
+      end
+    end
+    error =
+      assert_raises(DiscussionBridgeGhost::Error) do
+        catalog("authors", { "users" => [] })
+      end
+    assert_equal "response_invalid", error.code
+    error =
+      assert_raises(DiscussionBridgeGhost::Error) do
+        catalog("authors", { "users" => [], "meta" => {} })
+      end
+    assert_equal "response_invalid", error.code
+  end
+
+  def test_catalog_validates_selected_scalars_and_projects_only_pagination_facts
+    %w[authors taxonomy].each do |kind|
+      resource, selected = kind == "authors" ? %w[users status] : %w[tags slug]
+      pagination = {
+        "page" => 1,
+        "total" => 1,
+        "next" => nil,
+        "private" => {
+          "email" => "SYNTHETIC-private"
+        }
+      }
+      item = { "id" => ID, "name" => "Native label" }
+      payload = { resource => [item], "meta" => { "pagination" => pagination } }
+      # Missing native optional fields stay missing; availability is decided by
+      # the coordinator, never inferred from an invented default here.
+      result = catalog(kind, payload)
+      assert_equal %w[id name], result.fetch("items").first.keys.sort
+      assert_equal %w[next page total], result.fetch("pagination").keys.sort
+      refute_includes JSON.generate(result), "SYNTHETIC-private"
+      [nil, {}, [], 1, false].each do |bad|
+        item[selected] = bad
+        error =
+          assert_raises(DiscussionBridgeGhost::Error) { catalog(kind, payload) }
+        assert_equal "response_invalid", error.code
+      end
+      item[selected] = kind == "authors" ? "active" : "native-label"
+      assert_equal item[selected],
+                   catalog(kind, payload).fetch("items").first.fetch(selected)
+    end
+  end
 end

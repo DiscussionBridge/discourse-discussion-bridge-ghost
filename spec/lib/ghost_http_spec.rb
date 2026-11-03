@@ -110,4 +110,48 @@ RSpec.describe DiscussionBridgeGhost::GhostHttp do
     expect(first).to have_been_requested.once
     expect(destination).not_to have_been_requested
   end
+
+  it "closes a TCP-created TLS-incomplete connection on the whole-operation deadline without retry" do
+    # Execute the actual pinned Core/NetHTTP connect path, not WebMock's request
+    # interception. TCP/TLS objects are synthetic; no DNS or socket is opened.
+    client = FinalDestination::HTTP.new("ghost-native.example", 443, nil)
+    tcp = mock("synthetic TCP socket")
+    tcp.stubs(:setsockopt)
+    tcp.expects(:close).once
+    tls = Struct.new(:sync_close, :hostname, :closed).new
+    tls.define_singleton_method(:close) do
+      self.closed = true
+      tcp.close if sync_close
+    end
+    FinalDestination::SSRFDetector
+      .expects(:lookup_and_filter_ips)
+      .with("ghost-native.example", timeout: nil)
+      .returns(["93.184.216.34"])
+    client.expects(:timeouted_connect).once.returns(tcp)
+    OpenSSL::SSL::SSLSocket.expects(:new).once.with(tcp, anything).returns(tls)
+    client.define_singleton_method(:ssl_socket_connect) do |_socket, _timeout|
+      sleep 0.3
+    end
+    # WebMock normally defers connection setup until request interception.
+    # Drive the real connect implementation directly through this test-only
+    # start hook; cancellation must close its local socket before returning.
+    client.define_singleton_method(:start) { send(:connect) }
+    http =
+      described_class.new(
+        origin: "https://ghost-native.example",
+        protocol: DiscussionBridgeGhost::WireProtocol.new,
+        guard: -> {},
+        deadline_seconds: 0.1,
+        factory: ->(_host, _port) { client }
+      )
+    error = nil
+    expect { http.request("GET", "/", maximum_bytes: 100) }.to raise_error(
+      described_class::Failure
+    ) { |failure| error = failure }
+    expect(error.cause).to eq(nil)
+    expect(tls.closed).to eq(true)
+    expect(tls.sync_close).to eq(true)
+    expect(client.max_retries).to eq(0)
+    expect(client.instance_variable_get(:@socket)).to eq(nil)
+  end
 end

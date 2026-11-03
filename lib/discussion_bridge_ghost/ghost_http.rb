@@ -104,7 +104,11 @@ module DiscussionBridgeGhost
       end
       @guard.call
       response = nil
-      Timeout.timeout(@deadline_seconds) do
+      # The default Timeout internal exception bypasses Net::HTTP's
+      # StandardError cleanup while TLS still owns a local, not-yet-installed
+      # socket. An explicit exception traverses that cleanup; max_retries stays
+      # zero, and an interrupted write still has an uncertain native outcome.
+      Timeout.timeout(@deadline_seconds, Timeout::Error) do
         http = @factory.call(@address.hostname, @address.port)
         http.use_ssl = true
         http.verify_mode = OpenSSL::SSL::VERIFY_PEER
