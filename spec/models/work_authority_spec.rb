@@ -366,7 +366,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     requests = []
     with_runtime(app: observed_app(requests)) do |context, journal|
       lease = JSON.parse(JSON.generate(claim(context, journal)))
-      lease["lease_token"] = "SYNTHETIC-wrong-token-#{"x" * 24}"
+      lease["lease_token"] = SecureRandom.urlsafe_base64(32, false)
       held = authority(context, journal, lease)
       2.times do
         expect { held.guard!(operation: :mutate) }.to raise_error(
@@ -418,7 +418,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         body = +""
         response.last.each { |part| body << part }
         value = JSON.parse(body)
-        value["lease_token"] = "y" * 43
+        value["lease_token"] = SecureRandom.urlsafe_base64(32, false)
         response.last.close if response.last.respond_to?(:close)
         [
           response.first,
@@ -547,7 +547,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     requests = []
     app =
       observed_app(requests) do |response|
-        freeze_time(Time.current + 290.seconds)
+        freeze_time(290.seconds.from_now)
         response
       end
     with_runtime(app: app) do |context, journal|
@@ -574,7 +574,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     end
     original_expiry =
       @installation.mutations.find_by!(route_id: "V4-15").private_response
-    freeze_time(Time.current + 301.seconds)
+    freeze_time(301.seconds.from_now)
     with_runtime do |context, journal|
       expect {
         authority(context, journal, lease).guard!(operation: :mutate)
@@ -633,7 +633,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       expect(requests.length).to eq(1)
       pending = state.fetch("pending")
       limited = false
-      freeze_time(Time.current + 11.seconds)
+      freeze_time(11.seconds.from_now)
       held.guard!(operation: :mutate)
       expect(JSON.parse(requests[1]).fetch("mutation_id")).to eq(
         pending.fetch("mutation_id")
