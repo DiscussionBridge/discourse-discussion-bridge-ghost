@@ -32,22 +32,27 @@ module DiscussionBridgeGhost
       # JSON.parse does not perform JSON additions. Unlike the older parser,
       # the pinned json3 runtime rejects the removed create_additions option.
       parsed = JSON.parse(text, object_class: StrictObject)
-      numbers = text.scan(TOKEN).reject { |token| token.start_with?('"') }.map { |token| integer(token) }
+      numbers =
+        text
+          .scan(TOKEN)
+          .reject { |token| token.start_with?('"') }
+          .map { |token| integer(token) }
       index = 0
-      convert = lambda do |value|
-        case value
-        when Hash
-          value.transform_values { |member| convert.call(member) }
-        when Array
-          value.map { |member| convert.call(member) }
-        when Numeric
-          number = numbers.fetch(index)
-          index += 1
-          number
-        else
-          value
+      convert =
+        lambda do |value|
+          case value
+          when Hash
+            value.transform_values { |member| convert.call(member) }
+          when Array
+            value.map { |member| convert.call(member) }
+          when Numeric
+            number = numbers.fetch(index)
+            index += 1
+            number
+          else
+            value
+          end
         end
-      end
       result = convert.call(parsed)
       raise Error.new("response_invalid") unless index == numbers.length
       result
@@ -72,12 +77,17 @@ module DiscussionBridgeGhost
         end
         digits = digits[0, digits.length - places]
       else
-        raise Error.new("response_invalid") if digits.length + power > MAX_COUNTER.to_s.length
+        if digits.length + power > MAX_COUNTER.to_s.length
+          raise Error.new("response_invalid")
+        end
         digits += "0" * power
       end
       digits = digits.sub(/\A0+/, "")
       if digits.length > MAX_COUNTER.to_s.length ||
-           (digits.length == MAX_COUNTER.to_s.length && digits > MAX_COUNTER.to_s)
+           (
+             digits.length == MAX_COUNTER.to_s.length &&
+               digits > MAX_COUNTER.to_s
+           )
         raise Error.new("response_invalid")
       end
       digits.to_i

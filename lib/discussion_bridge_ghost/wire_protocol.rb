@@ -10,14 +10,22 @@ module DiscussionBridgeGhost
   # a same-suite dependency, not permission to bypass any actual V4 controller.
   # No receiver model/store/coordinator is called from this facade.
   class WireProtocol
-    NORMATIVE_SHA256 = "808042688cbde88fac0acdf1187e4cb8c251e13025bfcf09cf3a3c361ca02003"
-    SCHEMA_SHA256 = "e6a15a6d70f7bc8b8ee82aa22a0b9c2ff1bbf2da6277f7087118be9e026ce5c0"
+    NORMATIVE_SHA256 =
+      "808042688cbde88fac0acdf1187e4cb8c251e13025bfcf09cf3a3c361ca02003"
+    SCHEMA_SHA256 =
+      "e6a15a6d70f7bc8b8ee82aa22a0b9c2ff1bbf2da6277f7087118be9e026ce5c0"
     REQUEST_MAXIMUM = 65_536
     RESPONSE_MAXIMUM = 262_144
-    JSON_MEDIA = %r{\Aapplication/json(?:\s*;\s*charset\s*=\s*(?:UTF-8|"UTF-8"))?\s*\z}i
+    JSON_MEDIA =
+      %r{\Aapplication/json(?:\s*;\s*charset\s*=\s*(?:UTF-8|"UTF-8"))?\s*\z}i
 
     class Packet
-      attr_reader :route_id, :method, :path, :query, :body_bytes, :request_sha256
+      attr_reader :route_id,
+                  :method,
+                  :path,
+                  :query,
+                  :body_bytes,
+                  :request_sha256
 
       def initialize(owner:, route:, path:, query:, body_bytes:)
         @owner = owner
@@ -26,7 +34,8 @@ module DiscussionBridgeGhost
         @path = path.freeze
         @query = query.freeze
         @body_bytes = body_bytes&.dup&.force_encoding(Encoding::UTF_8)&.freeze
-        @request_sha256 = body_bytes && Digest::SHA256.hexdigest(body_bytes).freeze
+        @request_sha256 =
+          body_bytes && Digest::SHA256.hexdigest(body_bytes).freeze
         freeze
       end
 
@@ -40,7 +49,12 @@ module DiscussionBridgeGhost
     end
 
     class Result
-      attr_reader :status, :value, :route_id, :request_sha256, :body_bytes, :response_headers
+      attr_reader :status,
+                  :value,
+                  :route_id,
+                  :request_sha256,
+                  :body_bytes,
+                  :response_headers
 
       def initialize(status:, value:, packet:, bytes:, headers:)
         @status = status
@@ -48,7 +62,8 @@ module DiscussionBridgeGhost
         @route_id = packet.route_id
         @request_sha256 = packet.request_sha256
         @body_bytes = bytes.dup.force_encoding(Encoding::UTF_8).freeze
-        @response_headers = freeze_value(headers.slice("content-type", "content-encoding"))
+        @response_headers =
+          freeze_value(headers.slice("content-type", "content-encoding"))
         freeze
       end
 
@@ -59,8 +74,10 @@ module DiscussionBridgeGhost
         %w[V4-02 V4-29].include?(@route_id) && @status == 422 &&
           @value.is_a?(Hash) && @value["outcome"] == "rejected" &&
           @value["retryable"] == false && @value["retry_after_seconds"].nil? &&
-          (@value["code"] == "content_preservation_unavailable" ||
-            (@route_id == "V4-02" && @value["code"] == "invalid_field"))
+          (
+            @value["code"] == "content_preservation_unavailable" ||
+              (@route_id == "V4-02" && @value["code"] == "invalid_field")
+          )
       end
 
       def inspect
@@ -72,7 +89,10 @@ module DiscussionBridgeGhost
       def freeze_value(value)
         case value
         when Hash
-          value.each { |key, member| key.freeze; freeze_value(member) }
+          value.each do |key, member|
+            key.freeze
+            freeze_value(member)
+          end
         when Array
           value.each { |member| freeze_value(member) }
         end
@@ -85,7 +105,8 @@ module DiscussionBridgeGhost
         raise Error.new("receiver_unavailable")
       end
       @codec = codec || ::DiscussionBridge::CmsProtocol
-      unless @codec::CONTRACT_SHA256 == NORMATIVE_SHA256 && @codec::SCHEMA_SHA256 == SCHEMA_SHA256
+      unless @codec::CONTRACT_SHA256 == NORMATIVE_SHA256 &&
+               @codec::SCHEMA_SHA256 == SCHEMA_SHA256
         raise Error.new("protocol_mismatch")
       end
       @schema = @codec::SCHEMA
@@ -94,10 +115,24 @@ module DiscussionBridgeGhost
 
     def prepare(route_id, body: nil, path: {}, query: {}, retained_body: nil)
       route = route!(route_id)
-      raise Error.new("response_invalid") unless path.is_a?(Hash) && query.is_a?(Hash)
+      unless path.is_a?(Hash) && query.is_a?(Hash)
+        raise Error.new("response_invalid")
+      end
       raise Error.new("response_invalid") unless retained_body.nil? || body.nil?
-      raw = retained_body.nil? ? (body.nil? ? nil : JSON.generate(body)) : retained_body
-      decoded = raw.nil? ? nil : WireJson.parse(raw, maximum_bytes: REQUEST_MAXIMUM)
+      raw =
+        (
+          if retained_body.nil?
+            (body.nil? ? nil : JSON.generate(body))
+          else
+            retained_body
+          end
+        )
+      unless route["input"]
+        raise Error.new("response_invalid") unless raw.nil? || raw == ""
+        raw = nil
+      end
+      decoded =
+        raw.nil? ? nil : WireJson.parse(raw, maximum_bytes: REQUEST_MAXIMUM)
       if route["input"]
         @codec.validate!(route.fetch("input"), decoded)
       elsif !decoded.nil?
@@ -111,14 +146,32 @@ module DiscussionBridgeGhost
       fields = route.fetch("path").scan(/\{([^}]+)\}/).flatten
       raise Error.new("response_invalid") unless path.keys.sort == fields.sort
       fields.each do |field|
-        type = field == "source_id" ? "OpaqueId" : field == "source_revision" ? "Revision" : "UUID"
+        type =
+          field == "source_id" ?
+            "OpaqueId" :
+            field == "source_revision" ? "Revision" : "UUID"
         @codec.validate!(type, path.fetch(field))
-        body_identity = decoded.is_a?(Hash) && (decoded[field] || decoded.dig("authority", field))
-        raise Error.new("identity_conflict") if body_identity && body_identity != path.fetch(field)
+        body_identity =
+          decoded.is_a?(Hash) &&
+            (decoded[field] || decoded.dig("authority", field))
+        if body_identity && body_identity != path.fetch(field)
+          raise Error.new("identity_conflict")
+        end
       end
-      relative = route.fetch("path").gsub(/\{([^}]+)\}/) { segment(path.fetch(Regexp.last_match(1))) }
-      search = URI.encode_www_form(query.map { |name, value| [name, value.to_s] })
-      packet = Packet.new(owner: self, route: route, path: relative, query: search, body_bytes: raw&.dup)
+      relative =
+        route
+          .fetch("path")
+          .gsub(/\{([^}]+)\}/) { segment(path.fetch(Regexp.last_match(1))) }
+      search =
+        URI.encode_www_form(query.map { |name, value| [name, value.to_s] })
+      packet =
+        Packet.new(
+          owner: self,
+          route: route,
+          path: relative,
+          query: search,
+          body_bytes: raw&.dup
+        )
       @prepared[packet] = true
       packet
     rescue JSON::GeneratorError, EncodingError, KeyError
@@ -128,7 +181,8 @@ module DiscussionBridgeGhost
     def response(packet, status:, headers:, bytes:)
       assert_packet!(packet)
       route = route!(packet.route_id)
-      unless status.is_a?(Integer) && status.between?(200, 599) && headers.is_a?(Hash) && bytes.is_a?(String)
+      unless status.is_a?(Integer) && status.between?(200, 599) &&
+               headers.is_a?(Hash) && bytes.is_a?(String)
         raise Error.new("response_invalid")
       end
       lowered = {}
@@ -138,50 +192,99 @@ module DiscussionBridgeGhost
         lowered[key] = value
       end
       encoding = lowered["content-encoding"]
-      raise Error.new("response_invalid") unless encoding.nil? || encoding.to_s.downcase == "identity"
+      unless encoding.nil? || encoding.to_s.downcase == "identity"
+        raise Error.new("response_invalid")
+      end
       if status == 204
         unless route.fetch("success_http").include?(204) && bytes.empty?
           raise Error.new("response_invalid")
         end
-        return Result.new(status: status, value: nil, packet: packet, bytes: bytes, headers: lowered)
+        return(
+          Result.new(
+            status: status,
+            value: nil,
+            packet: packet,
+            bytes: bytes,
+            headers: lowered
+          )
+        )
       end
-      raise Error.new("response_invalid") unless JSON_MEDIA.match?(lowered["content-type"].to_s)
-      maximum = route["response"] == "ContentChunk" ? REQUEST_MAXIMUM : RESPONSE_MAXIMUM
+      unless JSON_MEDIA.match?(lowered["content-type"].to_s)
+        raise Error.new("response_invalid")
+      end
+      maximum =
+        route["response"] == "ContentChunk" ? REQUEST_MAXIMUM : RESPONSE_MAXIMUM
       value = WireJson.parse(bytes, maximum_bytes: maximum)
       if route.fetch("success_http").include?(status)
         @codec.validate!(route.fetch("response"), value)
         if packet.route_id == "V4-02"
-          expected = { "created" => 201, "resolved" => 200, "updated" => 200, "reconciliation_required" => 409 }[value["outcome"]]
+          expected =
+            {
+              "created" => 201,
+              "resolved" => 200,
+              "updated" => 200,
+              "reconciliation_required" => 409
+            }[
+              value["outcome"]
+            ]
           raise Error.new("response_invalid") unless status == expected
         end
-      elsif packet.route_id == "V4-02" && status == 409 && value.is_a?(Hash) && value["outcome"] == "reconciliation_required"
+      elsif packet.route_id == "V4-02" && status == 409 && value.is_a?(Hash) &&
+            value["outcome"] == "reconciliation_required"
         @codec.validate!("ResolveResult", value)
       elsif value.is_a?(Hash) && value["outcome"] == "rejected"
         @codec.validate_error_response!(packet.route_id, value, status)
-        specification = @schema.fetch("errors").find { |entry| entry.fetch("code") == value.fetch("code") }
-        raise Error.new("response_invalid") unless specification && specification.fetch("retryable") == value["retryable"]
+        specification =
+          @schema
+            .fetch("errors")
+            .find { |entry| entry.fetch("code") == value.fetch("code") }
+        unless specification &&
+                 specification.fetch("retryable") == value["retryable"]
+          raise Error.new("response_invalid")
+        end
       else
         raise Error.new("response_invalid")
       end
-      Result.new(status: status, value: value, packet: packet, bytes: bytes, headers: lowered)
+      Result.new(
+        status: status,
+        value: value,
+        packet: packet,
+        bytes: bytes,
+        headers: lowered
+      )
     end
 
     def maximum_response_bytes(packet)
       assert_packet!(packet)
-      route!(packet.route_id)["response"] == "ContentChunk" ? REQUEST_MAXIMUM : RESPONSE_MAXIMUM
+      if route!(packet.route_id)["response"] == "ContentChunk"
+        REQUEST_MAXIMUM
+      else
+        RESPONSE_MAXIMUM
+      end
     end
 
     def assert_packet!(packet)
-      unless packet.is_a?(Packet) && packet.owned_by?(self) && @prepared.key?(packet)
+      unless packet.is_a?(Packet) && packet.owned_by?(self) &&
+               @prepared.key?(packet)
         raise Error.new("response_invalid")
       end
       packet
     end
 
+    def origin_key(value)
+      @codec.validate!("Url", value)
+      parts = @codec.url_authority(value)
+      raise Error.new("configuration_invalid") unless parts.origin_only?
+      parts.comparison_origin
+    rescue @codec::Error
+      raise Error.new("configuration_invalid"), cause: nil
+    end
+
     private
 
     def route!(id)
-      @schema.fetch("routes").find { |route| route.fetch("id") == id } || raise(Error.new("response_invalid"))
+      @schema.fetch("routes").find { |route| route.fetch("id") == id } ||
+        raise(Error.new("response_invalid"))
     end
 
     def segment(value)

@@ -10,7 +10,9 @@ module DiscussionBridgeGhost
 
     def self.generate(api_key, now: Time.now.to_i)
       match = api_key.is_a?(String) && KEY.match(api_key)
-      raise Error.new("configuration_invalid") unless match && now.is_a?(Integer) && now >= 0
+      unless match && now.is_a?(Integer) && now >= 0
+        raise Error.new("configuration_invalid")
+      end
       header = encode("alg" => "HS256", "typ" => "JWT", "kid" => match[1])
       payload = encode("iat" => now, "exp" => now + 300, "aud" => "/admin/")
       input = "#{header}.#{payload}"

@@ -5,16 +5,24 @@ module DiscussionBridgeGhost
   # exceptions/bodies can contain credentials or unpublished native content.
   class Error < StandardError
     MESSAGES = {
-      "configuration_invalid" => "The Ghost connector configuration is invalid.",
-      "secret_unavailable" => "Protected connector data could not be opened. Restore the matching application key and retained data; do not replace its receipts.",
+      "configuration_invalid" =>
+        "The Ghost connector configuration is invalid.",
+      "secret_unavailable" =>
+        "Protected connector data could not be opened. Restore the matching application key and retained data; do not replace its receipts.",
       "signature_invalid" => "The Ghost event signature is invalid or expired.",
-      "receiver_unavailable" => "The matching DiscussionBridge V4 receiver is unavailable.",
-      "protocol_mismatch" => "The installed connector and receiver protocol identities do not match.",
+      "receiver_unavailable" =>
+        "The matching DiscussionBridge V4 receiver is unavailable.",
+      "protocol_mismatch" =>
+        "The installed connector and receiver protocol identities do not match.",
       "response_invalid" => "The upstream response is invalid.",
-      "native_lock_busy" => "This Ghost installation already has a native writer.",
+      "native_lock_busy" =>
+        "This Ghost installation already has a native writer.",
       "native_lock_lost" => "The Ghost native writer no longer owns its lock.",
-      "identity_conflict" => "Retained identity or request history requires reconciliation.",
-      "disabled" => "This Ghost connector installation is disabled."
+      "identity_conflict" =>
+        "Retained identity or request history requires reconciliation.",
+      "disabled" => "This Ghost connector installation is disabled.",
+      "transaction_open" =>
+        "Ghost synchronization requires a committed boundary outside an enclosing database transaction."
     }.freeze
 
     attr_reader :code

@@ -10,23 +10,45 @@ module DiscussionBridgeGhost
   # Completed/refused results are observations, not a new grant of authority for
   # a native write or a replacement for the coordinator's current Work checks.
   class MutationJournal
-    def initialize(installation:, protocol:, transport:, lease:, now: -> { Time.now.utc })
-      unless transport.is_a?(RackTransport) && transport.bound_to?(protocol, installation.connection_public_id) &&
-               lease.is_a?(NativeLock::Lease) && lease.native_target_id == installation.native_target.public_id
+    include ProtectedDiagnostics
+
+    def initialize(
+      installation:,
+      protocol:,
+      transport:,
+      lease:,
+      now: -> { Time.now.utc }
+    )
+      unless transport.is_a?(RackTransport) &&
+               transport.bound_to?(
+                 protocol,
+                 installation.connection_public_id
+               ) && lease.is_a?(NativeLock::Lease) &&
+               lease.native_target_id == installation.native_target.public_id
         raise Error.new("identity_conflict")
       end
-      @installation, @protocol, @transport, @lease, @now = installation, protocol, transport, lease, now
+      @installation, @protocol, @transport, @lease, @now =
+        installation,
+        protocol,
+        transport,
+        lease,
+        now
       @revision = installation.configuration_revision
       @target_id = installation.native_target_id
+      @binding = current_binding
     end
 
     def call(operation_key, route_id, path: {}, retained_body: nil, &make_body)
+      assert_no_transaction!
       assert_current!
-      unless operation_key.is_a?(String) && operation_key.bytesize.between?(1, 1024) &&
-               operation_key.valid_encoding? && !operation_key.match?(/[\p{Cc}]/)
+      unless operation_key.is_a?(String) &&
+               operation_key.bytesize.between?(1, 1024) &&
+               operation_key.valid_encoding? &&
+               !operation_key.match?(/[\p{Cc}]/)
         raise Error.new("identity_conflict")
       end
-      operation, packet = prepare(operation_key, route_id, path, retained_body, make_body)
+      operation, packet =
+        prepare(operation_key, route_id, path, retained_body, make_body)
       previous = operation.private_response
       if previous
         result = retained_result(packet, previous)
@@ -34,6 +56,7 @@ module DiscussionBridgeGhost
         return result if Time.iso8601(previous.fetch("retry_at")) > @now.call
       end
       assert_current!
+      assert_no_transaction!
       result = @transport.execute(packet)
       retain_response(operation, packet, result)
       result
@@ -45,7 +68,12 @@ module DiscussionBridgeGhost
     # invented rejection cannot populate this journal's authenticated receipt.
     # The coordinator must still obtain current proof before a deliberate retry.
     def confirmed_source_refusal(operation_key)
-      operation = @installation.mutations.find_by(operation_key: operation_key, state: "refused")
+      assert_current!
+      operation =
+        @installation.mutations.find_by(
+          operation_key: operation_key,
+          state: "refused"
+        )
       return nil unless operation
       packet = retained_packet(operation)
       receipt = operation.private_response
@@ -58,7 +86,9 @@ module DiscussionBridgeGhost
         "status" => result.status,
         "envelope" => result.value
       }
-      raise Error.new("identity_conflict") unless receipt.fetch("dispatch_proof") == expected
+      unless receipt.fetch("dispatch_proof") == expected
+        raise Error.new("identity_conflict")
+      end
       result
     rescue KeyError, ArgumentError, TypeError
       raise Error.new("identity_conflict"), cause: nil
@@ -69,7 +99,38 @@ module DiscussionBridgeGhost
     def assert_current!
       @lease.assert!
       @installation.assert_enabled!(expected_revision: @revision)
-      raise Error.new("identity_conflict") unless @installation.native_target_id == @target_id
+      unless @installation.native_target_id == @target_id
+        raise Error.new("identity_conflict")
+      end
+      raise Error.new("identity_conflict") unless current_binding == @binding
+    end
+
+    def assert_no_transaction!
+      if @installation
+           .class
+           .connection_pool
+           .active_connection?
+           &.transaction_open?
+        raise Error.new("transaction_open")
+      end
+    end
+
+    def current_binding
+      # Keep execution identity, not credential material/revision. A same-site,
+      # same-connection credential rotation may authenticate the retained exact
+      # request again; another connection/site must never inherit its history.
+      target = @installation.native_target.reload
+      {
+        "format" => "ghost-journal-identity-1",
+        "installation_id" => @installation.public_id,
+        "connection_id" => @installation.connection_public_id,
+        "forum_origin" => Discourse.base_url,
+        "native_target_id" => target.public_id,
+        "ghost_origin" => target.ghost_origin,
+        "admin_origin" => target.admin_origin,
+        "normative_sha256" => WireProtocol::NORMATIVE_SHA256,
+        "schema_sha256" => WireProtocol::SCHEMA_SHA256
+      }.transform_values { |value| value.dup.freeze }.freeze
     end
 
     def prepare(key, route_id, path, retained_body, make_body)
@@ -89,15 +150,34 @@ module DiscussionBridgeGhost
           end
         else
           body = retained_body ? nil : make_body&.call
-          packet = @protocol.prepare(route_id, body: body, path: path, retained_body: retained_body)
-          raise Error.new("identity_conflict") unless packet.method == "POST" && packet.body_bytes
-          request = { "route_id" => route_id, "path" => path, "body_bytes" => packet.body_bytes }
-          operation = @installation.mutations.create!(
-            operation_key: key,
-            route_id: route_id,
-            request_sha256: packet.request_sha256,
-            request_ciphertext: @installation.envelope.encrypt("journal_request", request, binding: key)
-          )
+          packet =
+            @protocol.prepare(
+              route_id,
+              body: body,
+              path: path,
+              retained_body: retained_body
+            )
+          unless packet.method == "POST" && packet.body_bytes
+            raise Error.new("identity_conflict")
+          end
+          request = {
+            "binding" => @binding,
+            "route_id" => route_id,
+            "path" => path,
+            "body_bytes" => packet.body_bytes
+          }
+          operation =
+            @installation.mutations.create!(
+              operation_key: key,
+              route_id: route_id,
+              request_sha256: packet.request_sha256,
+              request_ciphertext:
+                @installation.envelope.encrypt(
+                  "journal_request",
+                  request,
+                  binding: key
+                )
+            )
         end
       end
       [operation, packet]
@@ -105,63 +185,109 @@ module DiscussionBridgeGhost
 
     def retained_packet(operation)
       request = operation.private_request
-      unless request.is_a?(Hash) && request.keys.sort == %w[body_bytes path route_id] &&
-               request.fetch("route_id") == operation.route_id
+      unless request.is_a?(Hash) &&
+               request.keys.sort == %w[binding body_bytes path route_id] &&
+               request.fetch("route_id") == operation.route_id &&
+               request.fetch("binding") == @binding
         raise Error.new("identity_conflict")
       end
-      packet = @protocol.prepare(
-        operation.route_id, path: request.fetch("path"), retained_body: request.fetch("body_bytes")
-      )
-      unless packet.method == "POST" && packet.request_sha256 == operation.request_sha256
+      packet =
+        @protocol.prepare(
+          operation.route_id,
+          path: request.fetch("path"),
+          retained_body: request.fetch("body_bytes")
+        )
+      unless packet.method == "POST" &&
+               packet.request_sha256 == operation.request_sha256
         raise Error.new("identity_conflict")
       end
       packet
     end
 
     def retained_result(packet, receipt)
-      unless receipt.is_a?(Hash) && receipt.keys.sort == %w[body_bytes dispatch_proof headers received_at retry_at status]
+      unless receipt.is_a?(Hash) &&
+               receipt.keys.sort ==
+                 %w[
+                   binding
+                   body_bytes
+                   dispatch_proof
+                   headers
+                   received_at
+                   retry_at
+                   status
+                 ] && receipt.fetch("binding") == @binding
         raise Error.new("identity_conflict")
       end
       @protocol.response(
-        packet, status: receipt.fetch("status"), headers: receipt.fetch("headers"), bytes: receipt.fetch("body_bytes")
+        packet,
+        status: receipt.fetch("status"),
+        headers: receipt.fetch("headers"),
+        bytes: receipt.fetch("body_bytes")
       )
     end
 
     def retain_response(operation, packet, result)
-      rejected = result.value.is_a?(Hash) && result.value["outcome"] == "rejected"
+      rejected =
+        result.value.is_a?(Hash) && result.value["outcome"] == "rejected"
       retryable = rejected && result.value["retryable"] == true
-      state = if retryable
-        "pending"
-      elsif rejected
-        "refused"
-      else
-        "completed"
-      end
+      state =
+        if retryable
+          "pending"
+        elsif rejected
+          "refused"
+        else
+          "completed"
+        end
       observed_at = @now.call
       receipt = {
+        "binding" => @binding,
         "status" => result.status,
         "headers" => result.response_headers,
         "body_bytes" => result.body_bytes,
         "received_at" => observed_at.iso8601(6),
-        "retry_at" => retryable ? (observed_at + (result.value["retry_after_seconds"] || 60)).iso8601(6) : nil,
+        "retry_at" =>
+          (
+            if retryable
+              (
+                observed_at + (result.value["retry_after_seconds"] || 60)
+              ).iso8601(6)
+            else
+              nil
+            end
+          ),
         "dispatch_proof" => @transport.actual_source_refusal(result)
       }
+      assert_no_transaction!
       @installation.with_lock do
         operation.reload
-        unless operation.state == "pending" && retained_packet(operation).request_sha256 == packet.request_sha256
+        unless operation.state == "pending" &&
+                 retained_packet(operation).request_sha256 ==
+                   packet.request_sha256
           raise Error.new("identity_conflict")
         end
         # Append every actual response before updating the latest pointer. A
         # transient error never erases a historical response/claim/ACK receipt.
-        record_key = "#{Digest::SHA256.hexdigest(operation.operation_key)}:#{SecureRandom.uuid}"
+        record_key =
+          "#{Digest::SHA256.hexdigest(operation.operation_key)}:#{SecureRandom.uuid}"
         binding = JSON.generate(["mutation_receipt", record_key])
         @installation.operational_records.create!(
-          kind: "mutation_receipt", record_key: record_key,
-          encrypted_payload: @installation.envelope.encrypt("operational_record", receipt, binding: binding)
+          kind: "mutation_receipt",
+          record_key: record_key,
+          encrypted_payload:
+            @installation.envelope.encrypt(
+              "operational_record",
+              receipt,
+              binding: binding
+            )
         )
         operation.update!(
           state: state,
-          response_ciphertext: @installation.envelope.encrypt("journal_response", receipt, binding: operation.operation_key)
+          response_ciphertext:
+            @installation.envelope.encrypt(
+              "journal_response",
+              receipt,
+              binding: operation.operation_key
+            )
         )
       end
     end

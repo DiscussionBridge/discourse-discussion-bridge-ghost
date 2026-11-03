@@ -9,13 +9,23 @@ module DiscussionBridgeGhost
   # This is not an administrator session, a direct coordinator call, or an HTTP
   # proxy. No ambient cookies, API keys, shared-session headers or env are copied.
   class RackTransport
+    include ProtectedDiagnostics
+
     def bound_to?(protocol, connection_id)
       @protocol.equal?(protocol) && @connection_id == connection_id
     end
 
-    def initialize(protocol:, connection_id:, connection_secret:, app: Rails.application, base_url: Discourse.base_url)
-      unless connection_id.is_a?(String) && /\Adbc_[a-f0-9]{24}\z/.match?(connection_id) &&
-               connection_secret.is_a?(String) && connection_secret.bytesize.between?(32, 256) &&
+    def initialize(
+      protocol:,
+      connection_id:,
+      connection_secret:,
+      app: Rails.application,
+      base_url: Discourse.base_url
+    )
+      unless connection_id.is_a?(String) &&
+               /\Adbc_[a-f0-9]{24}\z/.match?(connection_id) &&
+               connection_secret.is_a?(String) &&
+               connection_secret.bytesize.between?(32, 256) &&
                !connection_secret.match?(/[\p{Cc}]/)
         raise Error.new("configuration_invalid")
       end
@@ -23,11 +33,14 @@ module DiscussionBridgeGhost
         raise Error.new("configuration_invalid")
       end
       uri = URI.parse(base_url)
-      unless uri.scheme == "https" && uri.host && !uri.userinfo && !uri.query && !uri.fragment
+      unless uri.scheme == "https" && uri.host && !uri.userinfo && !uri.query &&
+               !uri.fragment
         raise Error.new("configuration_invalid")
       end
       @protocol, @app = protocol, app
-      @connection_id, @connection_secret = connection_id.dup.freeze, connection_secret.dup.freeze
+      @connection_id, @connection_secret =
+        connection_id.dup.freeze,
+        connection_secret.dup.freeze
       @host = uri.host.freeze
       @port = uri.port
       @base_path = uri.path == "/" ? "" : uri.path.delete_suffix("/")
@@ -46,12 +59,19 @@ module DiscussionBridgeGhost
         maximum = status == 204 ? 0 : @protocol.maximum_response_bytes(packet)
         bytes = +"".b
         body.each do |chunk|
-          unless chunk.is_a?(String) && chunk.bytesize <= maximum - bytes.bytesize
+          unless chunk.is_a?(String) &&
+                   chunk.bytesize <= maximum - bytes.bytesize
             raise Error.new("response_invalid")
           end
           bytes << chunk.b
         end
-        result = @protocol.response(packet, status: status, headers: headers, bytes: bytes)
+        result =
+          @protocol.response(
+            packet,
+            status: status,
+            headers: headers,
+            bytes: bytes
+          )
       end
       if result.source_refusal_shape?
         # Evidence is registered only after this transport's actual dispatch and

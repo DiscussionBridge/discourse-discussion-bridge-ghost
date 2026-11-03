@@ -16,7 +16,11 @@ RSpec.describe DiscussionBridgeGhost::NativeLock do
     base = Class.new(ActiveRecord::Base) { self.abstract_class = true }
     stub_const(Object, :GhostConnectorLockTestRecord, base) do
       begin
-        base.establish_connection(ActiveRecord::Base.connection_db_config.configuration_hash.merge(pool: 2))
+        base.establish_connection(
+          ActiveRecord::Base.connection_db_config.configuration_hash.merge(
+            pool: 2
+          )
+        )
         @lock_pool = base.connection_pool
         example.run
       ensure
@@ -33,11 +37,14 @@ RSpec.describe DiscussionBridgeGhost::NativeLock do
   it "serializes actual PostgreSQL writers on distinct sessions for one target" do
     id = SecureRandom.uuid
     synchronize(id) do |lease|
-      result = Thread.new do
-        synchronize(id) { "unexpected second writer" }
-      rescue DiscussionBridgeGhost::Error => error
-        error.code
-      end.value
+      result =
+        Thread
+          .new do
+            synchronize(id) { "unexpected second writer" }
+          rescue DiscussionBridgeGhost::Error => error
+            error.code
+          end
+          .value
       expect(result).to eq("native_lock_busy")
       expect(lease.assert!).to eq(true)
     end
@@ -52,7 +59,10 @@ RSpec.describe DiscussionBridgeGhost::NativeLock do
         expect(lease.assert!).to eq(true)
         key = described_class.key(id)
         connection.select_value("SELECT pg_advisory_unlock(#{key})")
-        expect { lease.assert! }.to raise_error(DiscussionBridgeGhost::Error, /no longer owns/)
+        expect { lease.assert! }.to raise_error(
+          DiscussionBridgeGhost::Error,
+          /no longer owns/
+        )
       end
     end
   end
@@ -62,14 +72,43 @@ RSpec.describe DiscussionBridgeGhost::NativeLock do
     SiteSetting.discussion_bridge_endpoint_enabled = true
     SiteSetting.force_https = true
     protocol = DiscussionBridgeGhost::WireProtocol.new
-    transport = DiscussionBridgeGhost::RackTransport.new(
-      protocol: protocol,
-      connection_id: "dbc_#{'a' * 24}",
-      connection_secret: "SYNTHETIC-unknown-secret-#{'x' * 20}"
-    )
+    transport =
+      DiscussionBridgeGhost::RackTransport.new(
+        protocol: protocol,
+        connection_id: "dbc_#{"a" * 24}",
+        connection_secret: "SYNTHETIC-unknown-secret-#{"x" * 20}"
+      )
     synchronize(SecureRandom.uuid) do |lease|
       result = transport.execute(protocol.prepare("V4-01"))
       expect(result.value.fetch("code")).to eq("authentication_failed")
+      expect(lease.assert!).to eq(true)
+    end
+  end
+
+  it "permanently expires an old lease even when its exact session acquires the target again" do
+    id = SecureRandom.uuid
+    previous = nil
+    synchronize(id) { |lease| previous = lease }
+    expect { previous.assert! }.to raise_error(DiscussionBridgeGhost::Error)
+    synchronize(id) do |current|
+      expect(current.instance_variable_get(:@pid)).to eq(
+        previous.instance_variable_get(:@pid)
+      )
+      expect(current.assert!).to eq(true)
+      expect { previous.assert! }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+  end
+
+  it "discards an unsafe cleanup session rather than returning its lock to the pool" do
+    id = SecureRandom.uuid
+    lost_pid = nil
+    synchronize(id) do |lease|
+      connection = lease.instance_variable_get(:@connection)
+      lost_pid = connection.select_value("SELECT pg_backend_pid()")
+      connection.stubs(:select_value).raises("synthetic cleanup query failure")
+    end
+    synchronize(id) do |lease|
+      expect(lease.instance_variable_get(:@pid)).not_to eq(lost_pid)
       expect(lease.assert!).to eq(true)
     end
   end

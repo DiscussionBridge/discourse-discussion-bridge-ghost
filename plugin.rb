@@ -29,9 +29,18 @@ after_initialize do
     end
   end
 
-  %w[error secret_envelope webhook_signature admin_token native_lock wire_json wire_protocol rack_transport mutation_journal].each do |name|
-    require_relative "lib/discussion_bridge_ghost/#{name}"
-  end
+  %w[
+    error
+    protected_diagnostics
+    secret_envelope
+    webhook_signature
+    admin_token
+    native_lock
+    wire_json
+    wire_protocol
+    rack_transport
+    mutation_journal
+  ].each { |name| require_relative "lib/discussion_bridge_ghost/#{name}" }
   %w[native_target installation operational_record mutation].each do |name|
     require_relative "app/models/discussion_bridge_ghost/#{name}"
   end

@@ -14,27 +14,38 @@ RSpec.describe DiscussionBridgeGhost do
 
   def fixture_installation(target = fixture_target)
     id = SecureRandom.uuid
-    envelope = DiscussionBridgeGhost::SecretEnvelope.new(
-      application_key: Rails.application.secret_key_base,
-      installation_id: id
-    )
+    envelope =
+      DiscussionBridgeGhost::SecretEnvelope.new(
+        application_key: Rails.application.secret_key_base,
+        installation_id: id
+      )
     DiscussionBridgeGhost::Installation.create!(
       native_target: target,
       public_id: id,
       connection_public_id: "dbc_#{SecureRandom.hex(12)}",
-      encrypted_configuration: envelope.encrypt("configuration", { "secret" => "SYNTHETIC-configuration-secret" })
+      encrypted_configuration:
+        envelope.encrypt(
+          "configuration",
+          { "secret" => "SYNTHETIC-configuration-secret" }
+        )
     )
   end
 
   it "loads alongside the exact unchanged receiver and pinned Core" do
     expect(DiscussionBridgeGhost::VERSION).to eq("0.4.0-alpha.1")
-    expect(DiscussionBridge::CmsProtocol::CONTRACT_SHA256).to eq("808042688cbde88fac0acdf1187e4cb8c251e13025bfcf09cf3a3c361ca02003")
-    expect(DiscussionBridge::CmsProtocol::SCHEMA_SHA256).to eq("e6a15a6d70f7bc8b8ee82aa22a0b9c2ff1bbf2da6277f7087118be9e026ce5c0")
+    expect(DiscussionBridge::CmsProtocol::CONTRACT_SHA256).to eq(
+      "808042688cbde88fac0acdf1187e4cb8c251e13025bfcf09cf3a3c361ca02003"
+    )
+    expect(DiscussionBridge::CmsProtocol::SCHEMA_SHA256).to eq(
+      "e6a15a6d70f7bc8b8ee82aa22a0b9c2ff1bbf2da6277f7087118be9e026ce5c0"
+    )
     receiver_root = Rails.root.join("plugins/discourse-discussion-bridge")
-    receiver_sha, receiver_status = Open3.capture2("git", "-C", receiver_root.to_s, "rev-parse", "HEAD")
+    receiver_sha, receiver_status =
+      Open3.capture2("git", "-C", receiver_root.to_s, "rev-parse", "HEAD")
     expect(receiver_status.success?).to eq(true)
     expect(receiver_sha.strip).to eq("685eb3c6be54b8ef41b68949867b884703e2768e")
-    core_sha, core_status = Open3.capture2("git", "-C", Rails.root.to_s, "rev-parse", "HEAD")
+    core_sha, core_status =
+      Open3.capture2("git", "-C", Rails.root.to_s, "rev-parse", "HEAD")
     expect(core_status.success?).to eq(true)
     expect(core_sha.strip).to eq("acf8e70129f5359635f8227ad8a91a792204147e")
   end
@@ -43,26 +54,42 @@ RSpec.describe DiscussionBridgeGhost do
     expect(SiteSetting.discussion_bridge_ghost_enabled).to eq(false)
     installation = fixture_installation
     expect(installation.enabled).to eq(false)
-    expect { installation.assert_enabled! }.to raise_error(DiscussionBridgeGhost::Error, /disabled/)
+    expect { installation.assert_enabled! }.to raise_error(
+      DiscussionBridgeGhost::Error,
+      /disabled/
+    )
   end
 
   it "persists encrypted state and authenticates the installation and record identity" do
     installation = fixture_installation
     other = fixture_installation(installation.native_target)
-    value = { "lease_token" => "SYNTHETIC-private-lease", "native_id" => "native-one" }
-    binding = JSON.generate(["publication", "resource-one"])
-    record = installation.operational_records.create!(
-      kind: "publication",
-      record_key: "resource-one",
-      encrypted_payload: installation.envelope.encrypt("operational_record", value, binding: binding)
-    )
+    value = {
+      "lease_token" => "SYNTHETIC-private-lease",
+      "native_id" => "native-one"
+    }
+    binding = JSON.generate(%w[publication resource-one])
+    record =
+      installation.operational_records.create!(
+        kind: "publication",
+        record_key: "resource-one",
+        encrypted_payload:
+          installation.envelope.encrypt(
+            "operational_record",
+            value,
+            binding: binding
+          )
+      )
     expect(record.reload.private_payload).to eq(value)
     expect(record.encrypted_payload).not_to include("SYNTHETIC")
     record.installation = other
-    expect { record.private_payload }.to raise_error(DiscussionBridgeGhost::Error)
+    expect { record.private_payload }.to raise_error(
+      DiscussionBridgeGhost::Error
+    )
     record.installation = installation
     record.record_key = "resource-two"
-    expect { record.private_payload }.to raise_error(DiscussionBridgeGhost::Error)
+    expect { record.private_payload }.to raise_error(
+      DiscussionBridgeGhost::Error
+    )
   end
 
   it "retains one target domain for two legitimate connections and refuses duplicate target aliases" do

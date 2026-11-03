@@ -6,6 +6,8 @@ class CreateDiscussionBridgeGhostTables < ActiveRecord::Migration[7.0]
       t.uuid :public_id, null: false
       t.text :ghost_origin, null: false
       t.text :admin_origin, null: false
+      t.text :ghost_origin_key, null: false
+      t.text :admin_origin_key, null: false
       t.timestamps null: false
     end
     add_index :discussion_bridge_ghost_targets, :public_id, unique: true
@@ -13,6 +15,14 @@ class CreateDiscussionBridgeGhostTables < ActiveRecord::Migration[7.0]
     # target. Alias/identity changes require reconciliation, not another lock.
     add_index :discussion_bridge_ghost_targets, :ghost_origin, unique: true
     add_index :discussion_bridge_ghost_targets, :admin_origin, unique: true
+    add_index :discussion_bridge_ghost_targets,
+              :ghost_origin_key,
+              unique: true,
+              name: "idx_db_ghost_public_origin_identity"
+    add_index :discussion_bridge_ghost_targets,
+              :admin_origin_key,
+              unique: true,
+              name: "idx_db_ghost_admin_origin_identity"
 
     create_table :discussion_bridge_ghost_installations do |t|
       t.uuid :public_id, null: false
@@ -29,9 +39,16 @@ class CreateDiscussionBridgeGhostTables < ActiveRecord::Migration[7.0]
       t.timestamps null: false
     end
     add_index :discussion_bridge_ghost_installations, :public_id, unique: true
-    add_index :discussion_bridge_ghost_installations, :connection_public_id, unique: true, name: "idx_db_ghost_installation_connection"
-    add_index :discussion_bridge_ghost_installations, [:enabled, :next_run_at], name: "idx_db_ghost_due_installations"
-    add_foreign_key :discussion_bridge_ghost_installations, :discussion_bridge_ghost_targets, column: :native_target_id
+    add_index :discussion_bridge_ghost_installations,
+              :connection_public_id,
+              unique: true,
+              name: "idx_db_ghost_installation_connection"
+    add_index :discussion_bridge_ghost_installations,
+              %i[enabled next_run_at],
+              name: "idx_db_ghost_due_installations"
+    add_foreign_key :discussion_bridge_ghost_installations,
+                    :discussion_bridge_ghost_targets,
+                    column: :native_target_id
 
     create_table :discussion_bridge_ghost_records do |t|
       t.bigint :installation_id, null: false
@@ -40,8 +57,13 @@ class CreateDiscussionBridgeGhostTables < ActiveRecord::Migration[7.0]
       t.text :encrypted_payload, null: false
       t.timestamps null: false
     end
-    add_index :discussion_bridge_ghost_records, [:installation_id, :kind, :record_key], unique: true, name: "idx_db_ghost_record_identity"
-    add_foreign_key :discussion_bridge_ghost_records, :discussion_bridge_ghost_installations, column: :installation_id
+    add_index :discussion_bridge_ghost_records,
+              %i[installation_id kind record_key],
+              unique: true,
+              name: "idx_db_ghost_record_identity"
+    add_foreign_key :discussion_bridge_ghost_records,
+                    :discussion_bridge_ghost_installations,
+                    column: :installation_id
 
     create_table :discussion_bridge_ghost_mutations do |t|
       t.bigint :installation_id, null: false
@@ -53,8 +75,13 @@ class CreateDiscussionBridgeGhostTables < ActiveRecord::Migration[7.0]
       t.string :state, null: false, default: "pending"
       t.timestamps null: false
     end
-    add_index :discussion_bridge_ghost_mutations, [:installation_id, :operation_key], unique: true, name: "idx_db_ghost_exact_mutation"
-    add_foreign_key :discussion_bridge_ghost_mutations, :discussion_bridge_ghost_installations, column: :installation_id
+    add_index :discussion_bridge_ghost_mutations,
+              %i[installation_id operation_key],
+              unique: true,
+              name: "idx_db_ghost_exact_mutation"
+    add_foreign_key :discussion_bridge_ghost_mutations,
+                    :discussion_bridge_ghost_installations,
+                    column: :installation_id
     # No cascading deletes: disabling/removing an optional connector must not
     # erase native ownership, exact requests, historical ACKs or discussion.
   end
