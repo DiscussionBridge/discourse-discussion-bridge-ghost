@@ -276,6 +276,9 @@ RSpec.describe DiscussionBridgeGhost::OwnedFragment do
     draft = fragment(native_id: "pending")
     parser = fragment
     old_html = publication(draft)
+    expect { draft.extract(old_html, context: :document) }.to raise_error(
+      DiscussionBridgeGhost::Error
+    )
     native = current(draft, old_html)
     writer = DiscussionBridgeGhost::OwnedLexical.new(fragment: parser)
     args = {

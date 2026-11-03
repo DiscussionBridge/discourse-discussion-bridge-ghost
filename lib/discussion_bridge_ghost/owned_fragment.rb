@@ -88,6 +88,7 @@ module DiscussionBridgeGhost
     def extract(html, context: :card, expected: {})
       source = utf8(html)
       assert!(%i[card document].include?(context) && expected.is_a?(Hash))
+      assert!(@native_id != "pending") if context == :document
       bytes = source.b
       assert!(bytes.scan(RESERVED).length == 2)
       first = bytes.index(@begin_marker.b)
@@ -170,6 +171,8 @@ module DiscussionBridgeGhost
     # Re-derive both spans from actual bytes. A caller cannot pass an invented
     # offset or snapshot to write outside the validated owned section.
     def replace_span(original, replacement, baseline_sha256:)
+      original = utf8(original).freeze
+      replacement = utf8(replacement).freeze
       before = extract(original)
       after = extract(replacement)
       assert!(
