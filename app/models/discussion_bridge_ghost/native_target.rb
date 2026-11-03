@@ -12,3 +12,21 @@ module DiscussionBridgeGhost
     end
   end
 end
+
+# == Schema Information
+#
+# Table name: discussion_bridge_ghost_targets
+#
+#  id           :bigint           not null, primary key
+#  admin_origin :text             not null
+#  ghost_origin :text             not null
+#  created_at   :datetime         not null
+#  updated_at   :datetime         not null
+#  public_id    :uuid             not null
+#
+# Indexes
+#
+#  index_discussion_bridge_ghost_targets_on_admin_origin  (admin_origin) UNIQUE
+#  index_discussion_bridge_ghost_targets_on_ghost_origin  (ghost_origin) UNIQUE
+#  index_discussion_bridge_ghost_targets_on_public_id     (public_id) UNIQUE
+#

@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Check every Ruby source parses
-        run: find lib app db test -type f -name '*.rb' -print0 | xargs -0 -n1 ruby -c
+        run: find lib app db test spec scripts -type f -name '*.rb' -print0 | xargs -0 -n1 ruby -c
       - name: Run isolated synthetic foundation tests
         run: ruby test/foundation_test.rb
       - name: Verify unfinished package and protocol identities

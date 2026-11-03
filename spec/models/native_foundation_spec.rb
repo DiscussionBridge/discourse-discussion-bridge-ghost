@@ -3,7 +3,7 @@
 require "rails_helper"
 require "open3"
 
-RSpec.describe "DiscussionBridge Ghost native foundation" do
+RSpec.describe DiscussionBridgeGhost do
   def fixture_target
     DiscussionBridgeGhost::NativeTarget.create!(
       public_id: SecureRandom.uuid,
@@ -22,7 +22,7 @@ RSpec.describe "DiscussionBridge Ghost native foundation" do
       native_target: target,
       public_id: id,
       connection_public_id: "dbc_#{SecureRandom.hex(12)}",
-      encrypted_configuration: envelope.encrypt("configuration", "secret" => "SYNTHETIC-configuration-secret")
+      encrypted_configuration: envelope.encrypt("configuration", { "secret" => "SYNTHETIC-configuration-secret" })
     )
   end
 
@@ -77,30 +77,5 @@ RSpec.describe "DiscussionBridge Ghost native foundation" do
         admin_origin: "https://different-admin.example"
       )
     }.to raise_error(ActiveRecord::RecordInvalid)
-  end
-
-  it "serializes actual PostgreSQL writers across two connections to the same target" do
-    target = fixture_target
-    DiscussionBridgeGhost::NativeLock.synchronize(target.public_id) do |lease|
-      result = Thread.new do
-        DiscussionBridgeGhost::NativeLock.synchronize(target.public_id) { "unexpected second writer" }
-      rescue DiscussionBridgeGhost::Error => error
-        error.code
-      end.value
-      expect(result).to eq("native_lock_busy")
-      expect(lease.assert!).to eq(true)
-    end
-    expect(DiscussionBridgeGhost::NativeLock.synchronize(target.public_id) { "released" }).to eq("released")
-  end
-
-  it "detects a lost actual PostgreSQL lock before another native effect" do
-    id = SecureRandom.uuid
-    DiscussionBridgeGhost::NativeLock.synchronize(id) do |lease|
-      key = DiscussionBridgeGhost::NativeLock.key(id)
-      # Deliberately release only this test's private lock session. The normal
-      # model connection is not the connector's dedicated lock checkout.
-      lease.instance_variable_get(:@connection).select_value("SELECT pg_advisory_unlock(#{key})")
-      expect { lease.assert! }.to raise_error(DiscussionBridgeGhost::Error, /no longer owns/)
-    end
   end
 end

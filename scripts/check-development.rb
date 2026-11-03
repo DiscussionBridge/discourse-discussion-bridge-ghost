@@ -11,7 +11,7 @@ abort "Unexpected release" unless manifest["release_version"].nil?
 abort "Unexpected acceptance claim" unless manifest["status"] == "unfinished_implementation_candidate_not_qualified"
 abort "Wrong normative identity" unless manifest["normative_sha256"] == "808042688cbde88fac0acdf1187e4cb8c251e13025bfcf09cf3a3c361ca02003"
 abort "Wrong schema identity" unless manifest["schema_sha256"] == "e6a15a6d70f7bc8b8ee82aa22a0b9c2ff1bbf2da6277f7087118be9e026ce5c0"
-abort "Missing native plugin" unless File.read(File.join(root, "plugin.rb")).include?("# name: discourse-discussion-bridge-ghost")
-abort "Missing preserved license" unless File.read(File.join(root, "LICENSE")).include?("Copyright (c) 2026 WebSynergetics")
+abort "Missing native plugin" if File.read(File.join(root, "plugin.rb")).index("# name: discourse-discussion-bridge-ghost").nil?
+abort "Missing preserved license" if File.read(File.join(root, "LICENSE")).index("Copyright (c) 2026 WebSynergetics").nil?
 abort "Unexpected Node runtime package" if File.exist?(File.join(root, "package.json"))
 puts "Unfinished V4 native connector identities verified; no release or qualification asserted."

@@ -23,11 +23,39 @@ module DiscussionBridgeGhost
 
     def assert_enabled!(expected_revision: nil)
       reload
-      unless SiteSetting.discussion_bridge_ghost_enabled && enabled &&
-               (expected_revision.nil? || configuration_revision == expected_revision)
-        raise Error.new("disabled")
-      end
+      raise Error.new("disabled") unless SiteSetting.discussion_bridge_ghost_enabled && enabled
+      raise Error.new("disabled") if expected_revision && configuration_revision != expected_revision
       true
     end
   end
 end
+
+# == Schema Information
+#
+# Table name: discussion_bridge_ghost_installations
+#
+#  id                      :bigint           not null, primary key
+#  configuration_revision  :bigint           default(1), not null
+#  enabled                 :boolean          default(FALSE), not null
+#  encrypted_configuration :text             not null
+#  last_sync_completed_at  :datetime
+#  last_sync_started_at    :datetime
+#  last_sync_state         :string           default("not_run"), not null
+#  last_sync_summary       :jsonb            not null
+#  next_run_at             :datetime
+#  created_at              :datetime         not null
+#  updated_at              :datetime         not null
+#  connection_public_id    :string           not null
+#  native_target_id        :bigint           not null
+#  public_id               :uuid             not null
+#
+# Indexes
+#
+#  idx_db_ghost_due_installations                            (enabled,next_run_at)
+#  idx_db_ghost_installation_connection                      (connection_public_id) UNIQUE
+#  index_discussion_bridge_ghost_installations_on_public_id  (public_id) UNIQUE
+#
+# Foreign Keys
+#
+#  fk_rails_...  (native_target_id => discussion_bridge_ghost_targets.id)
+#

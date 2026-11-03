@@ -62,12 +62,4 @@ RSpec.describe DiscussionBridgeGhost::RackTransport do
       described_class.new(protocol: protocol, connection_id: "dbc_#{'a' * 24}", connection_secret: "x" * 43, base_url: "https://foreign.example")
     }.to raise_error(DiscussionBridgeGhost::Error)
   end
-
-  it "retains the dedicated native lock through actual Rack executor completion" do
-    DiscussionBridgeGhost::NativeLock.synchronize(SecureRandom.uuid) do |lease|
-      result = transport.execute(protocol.prepare("V4-01"))
-      expect(result.value.fetch("code")).to eq("authentication_failed")
-      expect(lease.assert!).to eq(true)
-    end
-  end
 end

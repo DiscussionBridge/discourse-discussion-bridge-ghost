@@ -24,7 +24,7 @@ module DiscussionBridgeGhost
       acquired = false
       begin
         raise Error.new("native_lock_lost") unless connection.adapter_name == "PostgreSQL"
-        acquired = connection.select_value("SELECT pg_try_advisory_lock(#{selected})")
+        acquired = connection.uncached { connection.select_value("SELECT pg_try_advisory_lock(#{selected})") }
         raise Error.new("native_lock_busy") unless acquired == true
         lease = Lease.new(connection, selected)
         lease.assert!
@@ -33,7 +33,9 @@ module DiscussionBridgeGhost
         begin
           # Never unlock an unrelated replacement session. Loss is not success;
           # the caller retains its exact intent/receipt for reconciliation.
-          connection.select_value("SELECT pg_advisory_unlock(#{selected})") if acquired && lease&.same_session?
+          if acquired && lease&.owned?
+            connection.uncached { connection.select_value("SELECT pg_advisory_unlock(#{selected})") }
+          end
         ensure
           pool.checkin(connection)
         end
@@ -44,21 +46,21 @@ module DiscussionBridgeGhost
       def initialize(connection, key)
         @connection = connection
         @session = connection.raw_connection
-        @pid = connection.select_value("SELECT pg_backend_pid()")
+        @pid = connection.uncached { connection.select_value("SELECT pg_backend_pid()") }
         @high = (key >> 32) & 0xffff_ffff
         @low = key & 0xffff_ffff
       end
 
       def same_session?
         @connection.raw_connection.equal?(@session) &&
-          @connection.select_value("SELECT pg_backend_pid()") == @pid
+          @connection.uncached { @connection.select_value("SELECT pg_backend_pid()") } == @pid
       rescue StandardError
         false
       end
 
-      def assert!
-        raise Error.new("native_lock_lost") unless same_session?
-        owned = @connection.select_value(<<~SQL)
+      def owned?
+        return false unless same_session?
+        query = <<~SQL
           SELECT EXISTS (
             SELECT 1 FROM pg_locks
             WHERE locktype = 'advisory' AND pid = pg_backend_pid()
@@ -66,7 +68,11 @@ module DiscussionBridgeGhost
               AND objsubid = 1 AND granted
           )
         SQL
-        raise Error.new("native_lock_lost") unless owned == true
+        @connection.uncached { @connection.select_value(query) } == true
+      end
+
+      def assert!
+        raise Error.new("native_lock_lost") unless owned?
         true
       end
     end

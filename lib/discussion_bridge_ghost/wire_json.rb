@@ -1,4 +1,7 @@
 # frozen_string_literal: true
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Exact-number handling adapted from the DiscussionBridge receiver; see NOTICE.md
+# and COPYING. This file's license is not replaced by the root MIT notice.
 
 require "json"
 
