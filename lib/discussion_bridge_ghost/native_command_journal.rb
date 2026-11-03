@@ -180,7 +180,8 @@ module DiscussionBridgeGhost
       attempt =
         @context.commit do
           command, state = load_state(command_id)
-          if state.fetch("pending_attempt") || state["completion"]
+          if state.fetch("pending_attempt") || state["completion"] ||
+               state["retirement"]
             raise Error.new("identity_conflict")
           end
           assert_target_clear!(except_command: command_id)
@@ -281,6 +282,25 @@ module DiscussionBridgeGhost
       snapshot("command" => command, "state" => state, "response" => response)
     end
 
+    # Retire only an intent whose complete original history proves no pending
+    # dispatch. A genuine retained not_sent outcome clears the pending attempt;
+    # an exception, missing reply or equal native content does not. This is a
+    # terminal local no-effect result, NOT native completion or ownership proof.
+    def retire_unsent!(command_id)
+      assert_effect_context!
+      @context.commit do
+        command, state, response = load_state(command_id)
+        next snapshot(state["retirement"]) if state["retirement"]
+        raise Error.new("native_effect_uncertain") if response
+        retirement = snapshot(retirement_for(command, state))
+        append(command, state, "intent_retired", retirement)
+        release_claims!(command, retirement.fetch("released_claims"))
+        remove_create_guard!(command)
+        load_state(command_id)
+        retirement
+      end
+    end
+
     # Retry only the LOCAL reservation after a conflicting alias disappears.
     # Reuse the retained genuine reply; no Ghost request or ownership is minted.
     def reconcile_discovery!(command_id)
@@ -323,18 +343,7 @@ module DiscussionBridgeGhost
             value.merge("released_claims" => active_claims(command, state))
           )
         append(command, state, "effect_completed", completion)
-        rows =
-          @installation.operational_records.where(
-            kind: "native_barrier",
-            record_key: completion.fetch("released_claims")
-          )
-        unless rows.count == completion.fetch("released_claims").length &&
-                 rows.all? { |row|
-                   row.private_payload["command_id"] == command_id
-                 }
-          raise Error.new("identity_conflict")
-        end
-        rows.delete_all
+        release_claims!(command, completion.fetch("released_claims"))
         remove_create_guard!(command)
         completion
       end
@@ -558,6 +567,46 @@ module DiscussionBridgeGhost
       command.dig("identity", "native_id").nil? && state["pending_attempt"] &&
         !state["completion"] &&
         (!state["discovery"] || state.dig("discovery", "guard_required"))
+    end
+
+    def retirement_for(command, state)
+      unless state["pending_attempt"].nil? &&
+               state["dispatch_recorded"] == false && !state["completion"] &&
+               !state["retirement"] && !state["discovery"] &&
+               !state["discovery_conflict"]
+        raise Error.new("native_effect_uncertain")
+      end
+      {
+        "format" => "ghost-native-retirement-1",
+        "binding" => @binding,
+        "command_id" => command.fetch("command_id"),
+        "command_sha256" => state.fetch("command_sha256"),
+        "reason" => "no_pending_dispatch",
+        "history_event_count" => state.fetch("event_count"),
+        "history_tail_sha256" => state.fetch("last_event_sha256"),
+        "released_claims" => active_claims(command, state)
+      }
+    end
+
+    def release_claims!(command, claims)
+      rows =
+        @installation.operational_records.where(
+          kind: "native_barrier",
+          record_key: claims
+        )
+      unless rows.count == claims.length &&
+               rows.all? { |row|
+                 row.private_payload ==
+                   {
+                     "format" => "ghost-native-barrier-1",
+                     "binding" => @binding,
+                     "command_id" => command.fetch("command_id"),
+                     "claim" => row.record_key
+                   }
+               }
+        raise Error.new("identity_conflict")
+      end
+      rows.delete_all
     end
 
     def install_create_guard!(command)
@@ -958,7 +1007,7 @@ module DiscussionBridgeGhost
             JSON.generate(event)
           )
         end
-      unless state["completion"]
+      unless state["completion"] || state["retirement"]
         barriers =
           @installation.operational_records.where(
             kind: "native_barrier",
@@ -1006,7 +1055,9 @@ module DiscussionBridgeGhost
     end
 
     def apply_event(state, event, command)
-      raise Error.new("identity_conflict") if state["completion"]
+      if state["completion"] || state["retirement"]
+        raise Error.new("identity_conflict")
+      end
       value = event.fetch("value")
       case event.fetch("kind")
       when "attempt_started"
@@ -1080,6 +1131,11 @@ module DiscussionBridgeGhost
         end
       when "native_observed"
         raise Error.new("identity_conflict") unless value.is_a?(Hash)
+      when "intent_retired"
+        unless value == retirement_for(command, state)
+          raise Error.new("identity_conflict")
+        end
+        state["retirement"] = value
       when "effect_completed"
         expected_claims = active_claims(command, state)
         # Read already-completed older development history without rewriting it.

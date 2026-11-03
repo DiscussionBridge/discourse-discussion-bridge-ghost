@@ -36,6 +36,12 @@ qualification preserves older original commands/events/receipts, including
 disabled installations, without using foreign connection credentials or issuing
 native/receiver requests. It is bounded and indexed, not a scan of all completed
 history on every ordinary write.
+An unstarted intent, or one whose actual transport history proves every attempt
+was not sent, may be explicitly retired with its original history preserved.
+Retirement releases only that command's temporary claims and is terminal; it
+does not prove a native publication or authorize a receiver acknowledgment.
+Pending, possibly sent, response-backed or completed effects cannot use this
+no-effect path. No controller/job or operator reset action activates it yet.
 URL-move authority, complete source rendering/metadata preparation, no-response
 recovery, current/public verification,
 coordinators, jobs and administration are still being implemented. Installing

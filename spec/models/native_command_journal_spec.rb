@@ -1307,6 +1307,288 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
     end
   end
 
+  %w[create_draft publish source_move].each do |action|
+    it "retires an unstarted #{action} intent as no effect, preserves terminal history and permits a separately prepared replacement" do
+      args =
+        (
+          if action == "source_move"
+            source_move_arguments("a" * 24)
+          else
+            arguments(action: action)
+          end
+        )
+      original, retired = nil, nil
+      with_journal do |journal, context|
+        original = journal.prepare(**args)
+        original_bytes =
+          row("native_command", args.fetch(:command_id)).encrypted_payload
+        retired = journal.retire_unsent!(args.fetch(:command_id))
+        expect(retired.fetch("format")).to eq("ghost-native-retirement-1")
+        expect(retired.fetch("reason")).to eq("no_pending_dispatch")
+        expect(retired.fetch("history_event_count")).to eq(0)
+        expect(retired.fetch("history_tail_sha256")).to eq(nil)
+        expect(retired.fetch("released_claims")).to eq(original.fetch("claims"))
+        expect(
+          row("native_command", args.fetch(:command_id)).encrypted_payload
+        ).to eq(original_bytes)
+        expect(
+          journal.retained(args.fetch(:command_id)).dig("state", "completion")
+        ).to eq(nil)
+        before = encrypted_snapshot
+        expect(journal.retire_unsent!(args.fetch(:command_id))).to eq(retired)
+        expect(journal.prepare(**args)).to eq(original)
+        expect(encrypted_snapshot).to eq(before)
+        expect {
+          journal.begin_attempt(
+            args.fetch(:command_id),
+            http: native_http(context)
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        executor =
+          DiscussionBridgeGhost::NativeExecutor.new(
+            context: context,
+            journal: journal,
+            api_key: "a" * 24 + ":" + "12" * 32
+          )
+        %i[execute recover].each do |operation|
+          expect {
+            executor.public_send(operation, args.fetch(:command_id))
+          }.to raise_error(DiscussionBridgeGhost::Error) { |error|
+            expect(error.code).to eq("native_command_retired")
+          }
+        end
+        expect {
+          journal.observe(args.fetch(:command_id), { "new" => "observation" })
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        replacement = args.deep_dup
+        replacement[:command_id] = SecureRandom.uuid
+        journal.prepare(**replacement)
+        expect(
+          journal.retained(args.fetch(:command_id)).fetch("command")
+        ).to eq(original)
+        expect(
+          journal.retained(args.fetch(:command_id)).dig("state", "retirement")
+        ).to eq(retired)
+      end
+      with_journal do |journal, _context|
+        expect(
+          journal.retained(args.fetch(:command_id)).dig("state", "retirement")
+        ).to eq(retired)
+        expect(
+          journal.retained(args.fetch(:command_id)).fetch("command")
+        ).to eq(original)
+      end
+      expect(a_request(:any, %r{ghost/api/admin})).not_to have_been_made
+    end
+  end
+
+  it "retires after genuine retained no-send across restart without rewriting the original attempts or executing again" do
+    args = arguments
+    original_events, original_bytes = nil, nil
+    with_journal do |journal, context|
+      command = journal.prepare(**args)
+      original_bytes =
+        row("native_command", args.fetch(:command_id)).encrypted_payload
+      http =
+        native_http(
+          context,
+          guard: -> { raise DiscussionBridgeGhost::Error.new("disabled") }
+        )
+      2.times do
+        attempt = journal.begin_attempt(args.fetch(:command_id), http: http)
+        error = nil
+        expect { send_command(http, command, attempt) }.to raise_error(
+          DiscussionBridgeGhost::Error
+        ) { |value| error = value }
+        journal.retain_dispatch(
+          args.fetch(:command_id),
+          attempt: attempt,
+          http: http,
+          outcome: error
+        )
+      end
+      original_events =
+        @installation
+          .operational_records
+          .where(kind: "native_event")
+          .order(:id)
+          .pluck(:id, :encrypted_payload)
+      expect(
+        journal.retained(args.fetch(:command_id)).dig(
+          "state",
+          "pending_attempt"
+        )
+      ).to eq(nil)
+    end
+    with_journal do |journal, _context|
+      retired = journal.retire_unsent!(args.fetch(:command_id))
+      expect(retired.fetch("history_event_count")).to eq(4)
+      expect(
+        row("native_command", args.fetch(:command_id)).encrypted_payload
+      ).to eq(original_bytes)
+      expect(
+        @installation
+          .operational_records
+          .where(id: original_events.map(&:first))
+          .order(:id)
+          .pluck(:id, :encrypted_payload)
+      ).to eq(original_events)
+      expect(journal.retained(args.fetch(:command_id)).fetch("response")).to eq(
+        nil
+      )
+      expect(
+        @installation.operational_records.where(kind: "native_barrier")
+      ).not_to exist
+      expect(
+        @installation.operational_records.where(kind: "native_unknown_create")
+      ).not_to exist
+      before = encrypted_snapshot
+      expect(journal.retire_unsent!(args.fetch(:command_id))).to eq(retired)
+      expect(encrypted_snapshot).to eq(before)
+    end
+    expect(a_request(:any, %r{ghost/api/admin})).not_to have_been_made
+  end
+
+  %w[
+    pending
+    no-send-then-pending
+    may-have-sent
+    response
+    completed
+  ].each do |shape|
+    it "refuses no-effect retirement for #{shape} native work and preserves all evidence" do
+      args = arguments
+      with_journal do |journal, context|
+        if %w[response completed].include?(shape)
+          _command, native = completed_response(journal, context, args)
+          if shape == "completed"
+            stub_native_reads(args, native)
+            DiscussionBridgeGhost::NativeExecutor.new(
+              context: context,
+              journal: journal,
+              api_key: "a" * 24 + ":" + "12" * 32
+            ).recover(args.fetch(:command_id))
+          end
+        else
+          command = journal.prepare(**args)
+          if shape == "no-send-then-pending"
+            deny =
+              native_http(
+                context,
+                guard: -> { raise DiscussionBridgeGhost::Error.new("disabled") }
+              )
+            first = journal.begin_attempt(args.fetch(:command_id), http: deny)
+            error = nil
+            expect { send_command(deny, command, first) }.to raise_error(
+              DiscussionBridgeGhost::Error
+            ) { |value| error = value }
+            journal.retain_dispatch(
+              args.fetch(:command_id),
+              attempt: first,
+              http: deny,
+              outcome: error
+            )
+          end
+          http = native_http(context)
+          attempt = journal.begin_attempt(args.fetch(:command_id), http: http)
+          if shape == "may-have-sent"
+            stub_request(
+              :post,
+              @installation.native_target.admin_origin +
+                args.dig(:request, "path")
+            ).to_raise(EOFError)
+            failure = nil
+            expect { send_command(http, command, attempt) }.to raise_error(
+              DiscussionBridgeGhost::Error
+            ) { |value| failure = value }
+            journal.retain_dispatch(
+              args.fetch(:command_id),
+              attempt: attempt,
+              http: http,
+              outcome: failure
+            )
+          end
+        end
+        before = encrypted_snapshot
+        expect {
+          journal.retire_unsent!(args.fetch(:command_id))
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        expect(encrypted_snapshot).to eq(before)
+        expect(
+          journal.retained(args.fetch(:command_id)).dig("state", "retirement")
+        ).to eq(nil)
+      end
+    end
+  end
+
+  it "rolls back retirement and claim release together when the local commit is interrupted" do
+    args = arguments
+    with_journal do |journal, _context|
+      journal.prepare(**args)
+      before = encrypted_snapshot
+      fired = false
+      injection =
+        TracePoint.new(:return) do |event|
+          if !fired && event.self.equal?(journal) &&
+               event.method_id == :release_claims!
+            fired = true
+            raise DiscussionBridgeGhost::Error.new("native_lock_lost")
+          end
+        end
+      begin
+        injection.enable
+        expect {
+          journal.retire_unsent!(args.fetch(:command_id))
+        }.to raise_error(DiscussionBridgeGhost::Error)
+      ensure
+        injection.disable
+      end
+      expect(fired).to eq(true)
+      expect(encrypted_snapshot).to eq(before)
+      expect(
+        journal.retained(args.fetch(:command_id)).dig("state", "retirement")
+      ).to eq(nil)
+      journal.retire_unsent!(args.fetch(:command_id))
+    end
+    expect(a_request(:any, %r{ghost/api/admin})).not_to have_been_made
+  end
+
+  it "refuses foreign history-only retirement and detects lost retirement history rather than fabricating an unstarted intent" do
+    args = arguments
+    other = make_installation(@installation.native_target)
+    with_journal { |journal, _context| journal.prepare(**args) }
+    @installation.update!(enabled: false)
+    with_journal(other) do |_journal, context|
+      history =
+        described_class.new(
+          context: context,
+          history_installation: @installation
+        )
+      before = encrypted_snapshot
+      expect { history.retire_unsent!(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect(encrypted_snapshot).to eq(before)
+    end
+    @installation.update!(enabled: true)
+    with_journal do |journal, _context|
+      initial_progress =
+        row("native_progress", args.fetch(:command_id)).encrypted_payload
+      journal.retire_unsent!(args.fetch(:command_id))
+      @installation.operational_records.where(kind: "native_event").delete_all
+      row("native_progress", args.fetch(:command_id)).update!(
+        encrypted_payload: initial_progress
+      )
+      expect { journal.retained(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect { journal.retire_unsent!(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+    end
+    expect(a_request(:any, %r{ghost/api/admin})).not_to have_been_made
+  end
+
   it "allows only a new attempt after genuine retained no-send, not a new command or an automatic transport retry" do
     args = arguments
     with_journal do |journal, context|

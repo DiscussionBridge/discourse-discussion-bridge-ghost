@@ -33,6 +33,9 @@ module DiscussionBridgeGhost
 
     def execute(command_id)
       retained = @journal.retained(command_id)
+      if retained.dig("state", "retirement")
+        raise Error.new("native_command_retired")
+      end
       command = retained.fetch("command")
       if retained.dig("state", "completion")
         return retained.dig("state", "completion")
@@ -141,6 +144,9 @@ module DiscussionBridgeGhost
     # lock, even if receiver work now belongs to another generation. This does
     # not reuse that old generation for a new write or ACK.
     def recover(command_id)
+      if @journal.retained(command_id).dig("state", "retirement")
+        raise Error.new("native_command_retired")
+      end
       @journal.reconcile_discovery!(command_id)
       retained = @journal.retained(command_id)
       if retained.dig("state", "completion")
