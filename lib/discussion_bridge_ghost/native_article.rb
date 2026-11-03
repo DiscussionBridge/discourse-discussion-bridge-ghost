@@ -318,9 +318,23 @@ module DiscussionBridgeGhost
       return "text", node.content if node.text?
       return nil if node.comment?
       if node.element?
+        attributes =
+          node.attribute_nodes.map do |attribute|
+            [attribute.namespace&.href || "", attribute.name, attribute.value]
+          end
+        attributes.concat(
+          node.namespace_definitions.map do |definition|
+            [
+              OwnedFragment::XMLNS_NAMESPACE,
+              definition.prefix || "xmlns",
+              definition.href
+            ]
+          end
+        )
         [
+          node.namespace&.href || OwnedFragment::HTML_NAMESPACE,
           node.name,
-          node.attribute_nodes.map { |a| [a.name, a.value] }.sort,
+          attributes.sort,
           node.children.filter_map { |child| tokens(child) }
         ]
       else
