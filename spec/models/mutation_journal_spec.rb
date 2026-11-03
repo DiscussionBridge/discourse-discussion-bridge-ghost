@@ -226,6 +226,89 @@ RSpec.describe DiscussionBridgeGhost::MutationJournal do
     expect(@installation.mutations.sole.state).to eq("completed")
   end
 
+  it "durably retains a typed source refusal after GC and reconstructs it without another dispatch" do
+    html = "<p>Private synthetic native source.</p>"
+    raw =
+      JSON.generate(
+        "mutation_id" => SecureRandom.uuid,
+        "bridge_record" => {
+          "direction" => "to_discourse",
+          "external_id" => "gc-source",
+          "canonical_url" => "#{@target.ghost_origin}/gc-source/",
+          "title" => "Native proof lifetime source",
+          "content_html" => html,
+          "published" => true,
+          "source_revision" => "native:gc1",
+          "expected_source_revision" => nil,
+          "source_created_at" => @clock.iso8601(3),
+          "source_updated_at" => nil,
+          "representation" => {
+            "kind" => "full"
+          },
+          "source_content_sha256" => Digest::SHA256.hexdigest(html),
+          "source_content_bytes" => html.bytesize
+        }
+      )
+    path =
+      File.expand_path(
+        "../../lib/discussion_bridge_ghost/mutation_journal.rb",
+        __dir__
+      )
+    line =
+      File
+        .readlines(path)
+        .find_index do |value|
+          value.include?(
+            '"dispatch_proof" => @transport.actual_source_refusal(result)'
+          )
+        end
+    expect(line).not_to eq(nil)
+    collected = false
+    trace =
+      TracePoint.new(:line) do |event|
+        if event.path == path && event.lineno == line + 1
+          trace.disable
+          3.times { GC.start(full_mark: true, immediate_sweep: true) }
+          collected = true
+        end
+      end
+    calls = 0
+    app = ->(_env) do
+      calls += 1
+      response("invalid_field", 422)
+    end
+    with_journal(app) do |journal|
+      trace.enable
+      result = journal.call("source:gc", "V4-02", retained_body: raw)
+      expect(collected).to eq(true)
+      expect(result.source_refusal_shape?).to eq(true)
+      expect(
+        journal.confirmed_source_refusal("source:gc").value.fetch("code")
+      ).to eq("invalid_field")
+    end
+    operation = @installation.mutations.sole
+    original_request, original_response =
+      operation.request_ciphertext,
+      operation.response_ciphertext
+    expect(
+      operation.private_response.dig("dispatch_proof", "request_sha256")
+    ).to eq(Digest::SHA256.hexdigest(raw))
+    with_journal(
+      ->(_env) { raise "must not repeat refused request" }
+    ) do |journal|
+      3.times { GC.start(full_mark: true, immediate_sweep: true) }
+      expect(journal.confirmed_source_refusal("source:gc").status).to eq(422)
+      expect(
+        journal.call("source:gc", "V4-02", retained_body: raw).status
+      ).to eq(422)
+    end
+    expect(calls).to eq(1)
+    expect(operation.reload.request_ciphertext).to eq(original_request)
+    expect(operation.response_ciphertext).to eq(original_response)
+  ensure
+    trace&.disable
+  end
+
   it "does not automatically redeliver a known nonretryable refusal" do
     calls = 0
     app = ->(_env) do

@@ -45,7 +45,7 @@ module DiscussionBridgeGhost
       @port = uri.port
       @base_path = uri.path == "/" ? "" : uri.path.delete_suffix("/")
       @host_header = (@port == 443 ? @host : "#{@host}:#{@port}").freeze
-      @received_refusals = ObjectSpace::WeakMap.new
+      @received_refusals = EvidenceRegistry.new
     rescue URI::InvalidURIError, EncodingError
       raise Error.new("configuration_invalid"), cause: nil
     end
@@ -76,13 +76,16 @@ module DiscussionBridgeGhost
       if result.source_refusal_shape?
         # Evidence is registered only after this transport's actual dispatch and
         # validated response. A parser result or caller-provided code is not one.
-        @received_refusals[result] = {
-          "route_id" => packet.route_id,
-          "connection_id" => @connection_id,
-          "request_sha256" => packet.request_sha256,
-          "status" => result.status,
-          "envelope" => result.value
-        }.freeze
+        @received_refusals.retain(
+          result,
+          {
+            "route_id" => packet.route_id,
+            "connection_id" => @connection_id,
+            "request_sha256" => packet.request_sha256,
+            "status" => result.status,
+            "envelope" => result.value
+          }.freeze
+        )
       end
       result
     rescue Error

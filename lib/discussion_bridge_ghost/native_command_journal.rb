@@ -25,6 +25,7 @@ module DiscussionBridgeGhost
       source_revision
       external_id
       move_id
+      proof_nonce
     ].sort.freeze
     IDENTITY_FIELDS = %w[resource_id kind native_id].sort.freeze
     REQUEST_FIELDS = %w[
@@ -313,24 +314,41 @@ module DiscussionBridgeGhost
                %w[from_discourse to_discourse].include?(owner["direction"]) &&
                %w[create_draft publish withdraw source_move].include?(
                  owner["action"]
-               ) &&
-               %w[source_revision external_id].all? { |field|
-                 owner[field].is_a?(String) &&
-                   owner[field].bytesize.between?(1, 1024) &&
-                   !owner[field].match?(/[\p{Cc}]/)
-               } && request.is_a?(Hash) && request.keys.sort == REQUEST_FIELDS
+               ) && request.is_a?(Hash) && request.keys.sort == REQUEST_FIELDS
         raise Error.new("identity_conflict")
       end
+      @protocol.validate!("OpaqueId", owner.fetch("external_id"))
       if owner["direction"] == "from_discourse"
         uuid!(owner["mapping_id"])
         uuid!(owner["work_id"])
         unless owner["generation"].is_a?(Integer) &&
                  owner["generation"].between?(1, WireJson::MAX_COUNTER) &&
-                 owner["move_id"].nil? && owner["action"] != "source_move"
+                 owner["action"] != "source_move"
           raise Error.new("identity_conflict")
         end
+        if owner["action"] == "withdraw"
+          unless owner["source_revision"].nil? && owner["move_id"].nil? &&
+                   owner["proof_nonce"].nil?
+            raise Error.new("identity_conflict")
+          end
+        else
+          @protocol.validate!("Revision", owner.fetch("source_revision"))
+          if owner["move_id"].nil?
+            unless owner["proof_nonce"].nil?
+              raise Error.new("identity_conflict")
+            end
+          else
+            unless owner["action"] == "publish" && identity["native_id"]
+              raise Error.new("identity_conflict")
+            end
+            @protocol.validate!("UUID", owner.fetch("move_id"))
+            @protocol.validate!("PublicNonce", owner.fetch("proof_nonce"))
+          end
+        end
       else
-        uuid!(owner["move_id"])
+        @protocol.validate!("UUID", owner.fetch("move_id"))
+        @protocol.validate!("PublicNonce", owner.fetch("proof_nonce"))
+        @protocol.validate!("Revision", owner.fetch("source_revision"))
         unless owner["mapping_id"].nil? && owner["work_id"].nil? &&
                  owner["generation"].is_a?(Integer) &&
                  owner["generation"] == 0 && owner["action"] == "source_move"
@@ -338,6 +356,14 @@ module DiscussionBridgeGhost
         end
       end
       create = owner["action"] == "create_draft"
+      # A From slug change is presentation URL management, not an ordinary
+      # publication update. Keep its actual move and proof nonce; this retains
+      # provenance only and does not authorize the URL move or its ACK.
+      if !create && owner["direction"] == "from_discourse" &&
+           command.dig("baseline", "slug") !=
+             command.dig("candidate", "slug") && owner["move_id"].nil?
+        raise Error.new("identity_conflict")
+      end
       path = "/ghost/api/admin/#{identity.fetch("kind")}s/"
       path += "#{identity.fetch("native_id")}/" unless create
       unless request["method"] == (create ? "POST" : "PUT") &&

@@ -64,6 +64,7 @@ module DiscussionBridgeGhost
         @body_bytes = bytes.dup.force_encoding(Encoding::UTF_8).freeze
         @response_headers =
           freeze_value(headers.slice("content-type", "content-encoding"))
+        EvidenceRegistry.prepare(self)
         freeze
       end
 

@@ -334,6 +334,149 @@ class GhostNativeHttpTest < Minitest::Test
     assert_equal 1, @connection.requests.length
   end
 
+  def with_interruption_at(fragment)
+    path =
+      File.expand_path("../lib/discussion_bridge_ghost/ghost_http.rb", __dir__)
+    line = File.readlines(path).find_index { |value| value.include?(fragment) }
+    refute_nil line
+    trace =
+      TracePoint.new(:line) do |event|
+        if event.path == path && event.lineno == line + 1
+          trace.disable
+          raise Timeout::Error
+        end
+      end
+    trace.enable
+    yield
+  ensure
+    trace&.disable
+  end
+
+  def test_interrupted_duplicate_never_creates_no_send_for_the_previous_dispatched_attempt
+    http = transport(Incoming.new(201))
+    identity = dispatch_identity
+    result = dispatch_write(http, identity)
+    [
+      "@dispatch_mutex.synchronize do",
+      "if @dispatches.key?(key)"
+    ].each do |line|
+      error =
+        assert_raises(DiscussionBridgeGhost::Error) do
+          with_interruption_at(line) { dispatch_write(http, identity) }
+        end
+      assert_nil http.actual_dispatch_evidence(error, dispatch: identity)
+      assert_equal "response_received",
+                   http
+                     .actual_dispatch_evidence(result, dispatch: identity)
+                     .value
+                     .fetch("phase")
+    end
+    assert_equal 1, @connection.requests.length
+  end
+
+  def test_interruption_before_exclusive_registration_is_not_a_dispatch_claim
+    [
+      "@dispatch_mutex.synchronize do",
+      "@dispatches[key] = true",
+      "dispatch_claimed = true"
+    ].each do |line|
+      http = transport(Incoming.new(201))
+      error =
+        assert_raises(DiscussionBridgeGhost::Error) do
+          with_interruption_at(line) { dispatch_write(http) }
+        end
+      assert_nil http.actual_dispatch_evidence(
+                   error,
+                   dispatch: dispatch_identity
+                 )
+      assert_empty @connection.requests
+    end
+    http = transport(Incoming.new(201))
+    error =
+      assert_raises(DiscussionBridgeGhost::Error) do
+        with_interruption_at("@guard.call") { dispatch_write(http) }
+      end
+    assert_equal "not_sent",
+                 http
+                   .actual_dispatch_evidence(error, dispatch: dispatch_identity)
+                   .value
+                   .fetch("phase")
+    assert_empty @connection.requests
+  end
+
+  def test_two_concurrent_invocations_of_one_attempt_cannot_both_send
+    http = transport(Incoming.new(201))
+    gate = Queue.new
+    threads =
+      2.times.map do
+        Thread.new do
+          gate.pop
+          begin
+            dispatch_write(http)
+          rescue DiscussionBridgeGhost::Error => error
+            error
+          end
+        end
+      end
+    2.times { gate << true }
+    threads.each do |thread|
+      assert thread.join(2), "request thread must terminate"
+    end
+    outcomes = threads.map(&:value)
+    assert_equal 1,
+                 outcomes.count { |outcome|
+                   outcome.is_a?(DiscussionBridgeGhost::GhostHttp::Response)
+                 }
+    failure =
+      outcomes.find { |outcome| outcome.is_a?(DiscussionBridgeGhost::Error) }
+    assert_nil http.actual_dispatch_evidence(
+                 failure,
+                 dispatch: dispatch_identity
+               )
+    assert_equal 1, @connection.requests.length
+  ensure
+    threads&.each { |thread| thread.kill if thread.alive? }
+  end
+
+  def test_proof_remains_identity_bound_and_live_while_response_or_error_is_held
+    %w[response_received not_sent may_have_sent].each do |phase|
+      incoming = phase == "may_have_sent" ? :failure : Incoming.new(201)
+      guard =
+        phase == "not_sent" ?
+          -> { raise DiscussionBridgeGhost::Error.new("disabled").freeze } :
+          -> {}
+      http = transport(incoming, guard: guard)
+      outcome =
+        begin
+          dispatch_write(http)
+        rescue DiscussionBridgeGhost::Error => error
+          error
+        end
+      assert !http.actual_dispatch_evidence(
+               outcome,
+               dispatch: dispatch_identity
+             ).nil?
+      3.times { GC.start(full_mark: true, immediate_sweep: true) }
+      evidence =
+        http.actual_dispatch_evidence(outcome, dispatch: dispatch_identity)
+      refute_nil evidence
+      assert_equal phase, evidence.value.fetch("phase")
+      assert_nil http.actual_dispatch_evidence(
+                   outcome.dup,
+                   dispatch: dispatch_identity
+                 )
+      assert_nil http.actual_dispatch_evidence(
+                   outcome,
+                   dispatch: dispatch_identity.merge("attempt_id" => RESOURCE)
+                 )
+      other = transport(Incoming.new(201))
+      assert_nil other.actual_dispatch_evidence(
+                   outcome,
+                   dispatch: dispatch_identity
+                 )
+    end
+  end
+
   def test_public_verification_never_sends_private_credentials
     http =
       transport(

@@ -31,7 +31,7 @@ if File
      .nil?
   abort "Missing native plugin"
 end
-unless File.read(File.join(root, "LICENSE")).include?("GPL-2.0-or-later")
+if File.read(File.join(root, "LICENSE")).index("GPL-2.0-or-later").nil?
   abort "Missing connector GPL license"
 end
 if File

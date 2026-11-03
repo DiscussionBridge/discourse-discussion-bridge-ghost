@@ -5,6 +5,7 @@ require "json"
 require "base64"
 require "openssl"
 require "pp"
+require "weakref"
 require_relative "../lib/discussion_bridge_ghost/error"
 require_relative "../lib/discussion_bridge_ghost/protected_diagnostics"
 require_relative "../lib/discussion_bridge_ghost/secret_envelope"
@@ -17,6 +18,45 @@ class GhostConnectorFoundationTest < Minitest::Test
   UUID = "a4147162-a4ab-4a43-99af-bbbf335189bd"
   OTHER = "20a59dad-638b-4290-a937-1a5fba7efeb1"
   SYNTHETIC_KEY = "a" * 64
+
+  def test_evidence_retention_uses_actual_outcome_identity_without_eviction
+    outcome = Struct.new(:status).new(422)
+    DiscussionBridgeGhost::EvidenceRegistry.prepare(outcome)
+    outcome.freeze
+    registries = 8.times.map { DiscussionBridgeGhost::EvidenceRegistry.new }
+    proofs =
+      registries.map.with_index do |registry, i|
+        registry.retain(outcome, { "private" => "SYNTHETIC-#{i}" }.freeze)
+      end
+    extra = DiscussionBridgeGhost::EvidenceRegistry.new
+    assert_nil extra.retain(outcome, { "extra" => true })
+    3.times { GC.start(full_mark: true, immediate_sweep: true) }
+    registries.each_with_index do |registry, i|
+      assert_same proofs[i], registry[outcome]
+      assert_nil registry[outcome.dup]
+      refute_includes registry.inspect, "SYNTHETIC"
+      refute_includes JSON.generate(registry), "SYNTHETIC"
+    end
+    assert_nil extra[outcome]
+    assert_nil extra.retain(Object.new.freeze, true)
+  end
+
+  def transient_evidence_outcome(registry)
+    outcome = Object.new
+    registry.retain(outcome, { "response" => outcome })
+    WeakRef.new(outcome)
+  end
+
+  def test_evidence_registry_does_not_keep_discarded_outcome_cycles_alive
+    registry = DiscussionBridgeGhost::EvidenceRegistry.new
+    # Ruby may conservatively retain a transient stack/register reference. Test
+    # a bounded population, not a timing-sensitive promise about one GC victim.
+    weak = 64.times.map { transient_evidence_outcome(registry) }
+    5.times { GC.start(full_mark: true, immediate_sweep: true) }
+    assert_operator weak.count { |reference| !reference.weakref_alive? },
+                    :>=,
+                    60
+  end
 
   def box(id = UUID, key = SYNTHETIC_KEY)
     DiscussionBridgeGhost::SecretEnvelope.new(

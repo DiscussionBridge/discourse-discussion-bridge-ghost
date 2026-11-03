@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "evidence_registry"
+
 module DiscussionBridgeGhost
   # Only fixed codes cross logging, job, HTTP and operator boundaries. Upstream
   # exceptions/bodies can contain credentials or unpublished native content.
@@ -40,6 +42,7 @@ module DiscussionBridgeGhost
     attr_reader :code
 
     def initialize(code)
+      EvidenceRegistry.prepare(self)
       @code = MESSAGES.key?(code) ? code : "response_invalid"
       super(MESSAGES.fetch(@code))
     end

@@ -62,8 +62,9 @@ module DiscussionBridgeGhost
       @factory =
         factory ||
           ->(host, port) { ::FinalDestination::HTTP.new(host, port, nil) }
-      @dispatch_evidence = ObjectSpace::WeakMap.new
+      @dispatch_evidence = EvidenceRegistry.new
       @dispatches = {}
+      @dispatch_mutex = Mutex.new
     end
 
     def bound_origin?(protocol:, origin:)
@@ -87,6 +88,7 @@ module DiscussionBridgeGhost
       dispatch: nil
     )
       descriptor = nil
+      dispatch_claimed = false
       may_have_sent = false
       response = nil
       unless %w[GET POST PUT].include?(method) && path.is_a?(String) &&
@@ -142,13 +144,16 @@ module DiscussionBridgeGhost
               authenticated: authenticated
             )
           key = descriptor.fetch("dispatch")
-          if @dispatches.key?(key) || @dispatches.size >= 10_000
-            # Duplicate invocation is not another no-send result for an older
-            # attempt. Refuse WITHOUT issuing transferable dispatch evidence.
-            descriptor = nil
-            raise Error.new("identity_conflict")
+          @dispatch_mutex.synchronize do
+            if @dispatches.key?(key) || @dispatches.size >= 10_000
+              raise Error.new("identity_conflict")
+            end
+            @dispatches[key] = true
+            # Only THIS invocation's exclusive registration permits a no-send
+            # observation. Interruption before this assignment is UNKNOWN,
+            # never a new proof for a prior sent/pending invocation.
+            dispatch_claimed = true
           end
-          @dispatches[key] = true
           method = descriptor.fetch("method")
         end
       end
@@ -248,23 +253,40 @@ module DiscussionBridgeGhost
                 status: status,
                 headers: retained_headers,
                 bytes: bytes.freeze
-              ).freeze
+              )
+            EvidenceRegistry.prepare(response)
+            response.freeze
           end
         end
         @guard.call
       end
       result = response || raise(Failure.new)
-      remember_dispatch(result, descriptor, may_have_sent, response)
+      remember_dispatch(
+        result,
+        dispatch_claimed ? descriptor : nil,
+        may_have_sent,
+        response
+      )
       result
     rescue Error => error
-      remember_dispatch(error, descriptor, may_have_sent, response)
+      remember_dispatch(
+        error,
+        dispatch_claimed ? descriptor : nil,
+        may_have_sent,
+        response
+      )
       raise
     rescue StandardError
       # A failed POST/PUT may already have reached Ghost. The native coordinator
       # must retain its prior intent and look up ownership; never create again
       # merely because a reply or this transport's deadline was lost.
       error = Failure.new
-      remember_dispatch(error, descriptor, may_have_sent, response)
+      remember_dispatch(
+        error,
+        dispatch_claimed ? descriptor : nil,
+        may_have_sent,
+        response
+      )
       raise error, cause: nil
     end
 
@@ -302,10 +324,13 @@ module DiscussionBridgeGhost
         else
           "not_sent"
         end
-      @dispatch_evidence[outcome] = DispatchEvidence.new(
-        value: descriptor.merge("phase" => phase.freeze).freeze,
-        response: response
-      ).freeze
+      @dispatch_evidence.retain(
+        outcome,
+        DispatchEvidence.new(
+          value: descriptor.merge("phase" => phase.freeze).freeze,
+          response: response
+        ).freeze
+      )
     end
   end
 end

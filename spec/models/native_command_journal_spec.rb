@@ -114,7 +114,7 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
     fields = {
       "slug" => "retained-native-command",
       "title" => "Private native command",
-      "status" => create ? "draft" : "published"
+      "status" => (create || action == "withdraw") ? "draft" : "published"
     }
     baseline =
       (
@@ -125,7 +125,8 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
             "id" => native_id,
             "slug" => fields.fetch("slug"),
             "updated_at" => "2026-11-03T10:00:00.000Z",
-            "lexical" => "SYNTHETIC-unrelated-lexical"
+            "lexical" => "SYNTHETIC-unrelated-lexical",
+            "status" => "published"
           }
         end
       )
@@ -146,9 +147,10 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
         "mapping_id" => SecureRandom.uuid,
         "work_id" => SecureRandom.uuid,
         "generation" => 2,
-        "source_revision" => "post:24:version:1",
+        "source_revision" => action == "withdraw" ? nil : "post:24:version:1",
         "external_id" => "native-target-one",
-        "move_id" => nil
+        "move_id" => nil,
+        "proof_nonce" => nil
       },
       request: {
         "method" => create ? "POST" : "PUT",
@@ -564,7 +566,9 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
         "mapping_id" => nil,
         "work_id" => nil,
         "generation" => 0,
-        "move_id" => SecureRandom.uuid
+        "move_id" => SecureRandom.uuid,
+        "proof_nonce" =>
+          Base64.urlsafe_encode64(SecureRandom.random_bytes(32), padding: false)
       )
       fields =
         moved
@@ -645,6 +649,292 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
       expect { journal.retained(args.fetch(:command_id)) }.to raise_error(
         DiscussionBridgeGhost::Error
       )
+    end
+  end
+
+  def compatible_work!(context, args)
+    owner = args.fetch(:owner)
+    work = {
+      "work_id" => owner.fetch("work_id"),
+      "mapping_id" => owner.fetch("mapping_id"),
+      "source_id" => "topic:24",
+      "source_revision" => owner.fetch("source_revision"),
+      "policy_revision" => "policy:1",
+      "action" =>
+        owner.fetch("action") == "withdraw" ? "withdraw" : "publish_revision",
+      "state" => "leased",
+      "attempt_cycle" => SecureRandom.uuid,
+      "attempt" => 1,
+      "lease_generation" => owner.fetch("generation"),
+      "retry_at" => nil,
+      "last_failure_code" => nil
+    }
+    context.protocol.validate!("Work", work)
+    guard = DiscussionBridgeGhost::WorkAuthority.allocate
+    guard.instance_variable_set(:@protocol, context.protocol)
+    # Actual pinned validator compatibility, not a forged successful guard or
+    # a claim that this synthetic fixture obtained current effect authority.
+    guard.send(
+      :validate_work_identity!,
+      work.slice(*DiscussionBridgeGhost::WorkAuthority::WORK_FIELDS)
+    )
+  end
+
+  it "retains null original withdrawal revision across restart separately from the prior owned revision" do
+    args = arguments(action: "withdraw")
+    args[:baseline]["prior_owned_source_revision"] = "post:24:version:1"
+    with_journal do |journal, context|
+      compatible_work!(context, args)
+      retained = journal.prepare(**args)
+      expect(retained.dig("owner", "source_revision")).to eq(nil)
+      expect(retained.dig("baseline", "prior_owned_source_revision")).to eq(
+        "post:24:version:1"
+      )
+      before = encrypted_snapshot
+      [false, "post:24:version:1", "invented"].each do |revision|
+        expect {
+          journal.prepare(
+            **args.merge(
+              owner: args.fetch(:owner).merge("source_revision" => revision)
+            )
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        expect(encrypted_snapshot).to eq(before)
+      end
+    end
+    with_journal do |journal, context|
+      compatible_work!(context, args)
+      expect(journal.prepare(**args).dig("owner", "source_revision")).to eq(nil)
+      expect(
+        journal.retained(args.fetch(:command_id)).dig(
+          "command",
+          "baseline",
+          "prior_owned_source_revision"
+        )
+      ).to eq("post:24:version:1")
+    end
+  end
+
+  it "retains actual From presentation-move identity without calling it an ordinary publication or To move" do
+    args = arguments(action: "publish")
+    args[:baseline]["slug"] = "old-presentation"
+    args[:owner]["move_id"] = SecureRandom.uuid
+    args[:owner]["proof_nonce"] = Base64.urlsafe_encode64(
+      SecureRandom.random_bytes(32),
+      padding: false
+    )
+    with_journal do |journal, context|
+      compatible_work!(context, args)
+      context.protocol.validate!(
+        "UrlMove",
+        {
+          "move_id" => args.dig(:owner, "move_id"),
+          "mapping_id" => args.dig(:owner, "mapping_id"),
+          "expected_mapping_revision" => "mapping:1",
+          "old_url" =>
+            "#{@installation.native_target.ghost_origin}/old-presentation/",
+          "new_url" =>
+            "#{@installation.native_target.ghost_origin}/#{args.dig(:candidate, "slug")}/",
+          "proof_nonce" => args.dig(:owner, "proof_nonce"),
+          "state" => "prepared",
+          "prepared_at" => @clock.iso8601(3)
+        }
+      )
+      journal.prepare(**args)
+      before = encrypted_snapshot
+      [
+        args[:owner].merge("move_id" => nil, "proof_nonce" => nil),
+        args[:owner].merge("proof_nonce" => nil),
+        args[:owner].merge("move_id" => SecureRandom.uuid)
+      ].each do |owner|
+        expect { journal.prepare(**args.merge(owner: owner)) }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+        expect(encrypted_snapshot).to eq(before)
+      end
+    end
+    with_journal do |journal, _context|
+      expect(journal.prepare(**args).fetch("owner")).to eq(args.fetch(:owner))
+    end
+  end
+
+  it "retains valid To source-move provenance without a From mapping or lease" do
+    args = arguments(action: "publish")
+    args[:baseline]["slug"] = "old-source"
+    args[:owner].merge!(
+      "direction" => "to_discourse",
+      "action" => "source_move",
+      "mapping_id" => nil,
+      "work_id" => nil,
+      "generation" => 0,
+      "move_id" => SecureRandom.uuid,
+      "proof_nonce" =>
+        Base64.urlsafe_encode64(SecureRandom.random_bytes(32), padding: false)
+    )
+    args[:request]["body_bytes"] = JSON.generate(
+      "posts" => [args.fetch(:candidate).slice("id", "slug", "updated_at")]
+    )
+    with_journal do |journal, context|
+      context.protocol.validate!(
+        "SourceUrlMove",
+        {
+          "move_id" => args.dig(:owner, "move_id"),
+          "resource_id" => args.dig(:identity, "resource_id"),
+          "expected_source_revision" => args.dig(:owner, "source_revision"),
+          "old_url" =>
+            "#{@installation.native_target.ghost_origin}/old-source/",
+          "new_url" =>
+            "#{@installation.native_target.ghost_origin}/#{args.dig(:candidate, "slug")}/",
+          "proof_nonce" => args.dig(:owner, "proof_nonce"),
+          "state" => "prepared",
+          "prepared_at" => @clock.iso8601(3)
+        }
+      )
+      expect(journal.prepare(**args).fetch("owner")).to eq(args.fetch(:owner))
+      expect {
+        journal.prepare(
+          **args.merge(
+            owner: args[:owner].merge("mapping_id" => SecureRandom.uuid)
+          )
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+    with_journal do |journal, _context|
+      expect(journal.prepare(**args).fetch("owner")).to eq(args.fetch(:owner))
+    end
+  end
+
+  def interrupted_duplicate(http, command, attempt)
+    path =
+      File.expand_path(
+        "../../lib/discussion_bridge_ghost/ghost_http.rb",
+        __dir__
+      )
+    line =
+      File
+        .readlines(path)
+        .find_index { |value| value.include?("if @dispatches.key?(key)") }
+    expect(line).not_to eq(nil)
+    trace =
+      TracePoint.new(:line) do |event|
+        if event.path == path && event.lineno == line + 1
+          trace.disable
+          raise Timeout::Error
+        end
+      end
+    trace.enable
+    send_command(http, command, attempt)
+  ensure
+    trace&.disable
+  end
+
+  it "refuses interrupted duplicate proof through the actual durable journal without clearing the sent attempt" do
+    args = arguments
+    with_journal do |journal, context|
+      command = journal.prepare(**args)
+      request =
+        stub_request(
+          :post,
+          @installation.native_target.admin_origin +
+            command.dig("request", "path")
+        ).to_return(
+          status: 201,
+          headers: {
+            "Content-Type" => "application/json"
+          },
+          body: '{"posts":[]}'
+        )
+      http = native_http(context)
+      attempt = journal.begin_attempt(args.fetch(:command_id), http: http)
+      response = send_command(http, command, attempt)
+      error = nil
+      expect { interrupted_duplicate(http, command, attempt) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      ) { |value| error = value }
+      before = encrypted_snapshot
+      expect {
+        journal.retain_dispatch(
+          args.fetch(:command_id),
+          attempt: attempt,
+          http: http,
+          outcome: error
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(encrypted_snapshot).to eq(before)
+      expect(
+        journal.retained(args.fetch(:command_id)).dig(
+          "state",
+          "pending_attempt"
+        )
+      ).to eq(attempt)
+      3.times { GC.start(full_mark: true, immediate_sweep: true) }
+      journal.retain_dispatch(
+        args.fetch(:command_id),
+        attempt: attempt,
+        http: http,
+        outcome: response
+      )
+      expect {
+        journal.begin_attempt(args.fetch(:command_id), http: http)
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(request).to have_been_requested.once
+    end
+  end
+
+  it "retains actual pre-send and post-send errors after GC without allowing forged outcome copies" do
+    %w[not_sent may_have_sent].each do |phase|
+      args = arguments
+      args[:candidate]["slug"] += "-#{phase.tr("_", "-")}"
+      body = JSON.parse(args.dig(:request, "body_bytes"))
+      body["posts"].first["slug"] = args.dig(:candidate, "slug")
+      args[:request]["body_bytes"] = JSON.generate(body)
+      with_journal do |journal, context|
+        command = journal.prepare(**args)
+        request =
+          stub_request(
+            :post,
+            @installation.native_target.admin_origin +
+              command.dig("request", "path")
+          ).to_timeout
+        guard =
+          phase == "not_sent" ?
+            -> { raise DiscussionBridgeGhost::Error.new("disabled").freeze } :
+            -> {}
+        http = native_http(context, guard: guard)
+        attempt = journal.begin_attempt(args.fetch(:command_id), http: http)
+        error = nil
+        expect { send_command(http, command, attempt) }.to raise_error(
+          DiscussionBridgeGhost::Error
+        ) { |value| error = value }
+        3.times { GC.start(full_mark: true, immediate_sweep: true) }
+        before = encrypted_snapshot
+        expect {
+          journal.retain_dispatch(
+            args.fetch(:command_id),
+            attempt: attempt,
+            http: http,
+            outcome: error.dup
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        expect(encrypted_snapshot).to eq(before)
+        journal.retain_dispatch(
+          args.fetch(:command_id),
+          attempt: attempt,
+          http: http,
+          outcome: error
+        )
+        expect(
+          journal
+            .retained(args.fetch(:command_id))
+            .dig("state", "pending_attempt")
+            .nil?
+        ).to eq(phase == "not_sent")
+        if phase == "not_sent"
+          expect(request).not_to have_been_requested
+        else
+          expect(request).to have_been_requested.once
+        end
+      end
     end
   end
 
