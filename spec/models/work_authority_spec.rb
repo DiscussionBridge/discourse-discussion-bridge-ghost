@@ -129,8 +129,12 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
 
   after do
     if @installation&.persisted?
-      @installation.operational_records.delete_all
-      @installation.mutations.delete_all
+      DiscussionBridgeGhost::OperationalRecord.where(
+        installation_id: @installation.id
+      ).delete_all
+      DiscussionBridgeGhost::Mutation.where(
+        installation_id: @installation.id
+      ).delete_all
       @installation.delete
     end
     @target.delete if @target&.persisted?
@@ -138,7 +142,9 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       DiscussionBridgeCmsMutationReceipt.where(
         content_connection_id: @connection.id
       ).delete_all
-      @mapping.work_items.delete_all if @mapping&.persisted?
+      if @mapping&.persisted?
+        DiscussionBridgeCmsWork.where(cms_mapping_id: @mapping.id).delete_all
+      end
       @mapping.delete if @mapping&.persisted?
       @binding.delete if @binding&.persisted?
       @record.delete if @record&.persisted?
@@ -377,7 +383,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     expect(state.fetch("next_renewal")).to eq(0)
   end
 
-  it "rejects returned token and outer/inner generation disagreement without clearing pending intent" do
+  it "rejects outer/inner generation disagreement without clearing pending intent" do
     requests = []
     app =
       observed_app(requests) do |response|
@@ -385,6 +391,34 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         response.last.each { |part| body << part }
         value = JSON.parse(body)
         value["lease_generation"] += 1
+        response.last.close if response.last.respond_to?(:close)
+        [
+          response.first,
+          { "content-type" => "application/json" },
+          [JSON.generate(value)]
+        ]
+      end
+    with_runtime(app: app) do |context, journal|
+      lease = claim(context, journal)
+      expect {
+        authority(context, journal, lease).guard!(operation: :mutate)
+      }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+    expect(state.fetch("pending")).not_to eq(nil)
+    expect(state.fetch("next_renewal")).to eq(0)
+    expect(
+      @installation.operational_records.where(kind: "mapping_fence").count
+    ).to eq(0)
+  end
+
+  it "rejects a well-typed returned token that does not match retained authority" do
+    requests = []
+    app =
+      observed_app(requests) do |response|
+        body = +""
+        response.last.each { |part| body << part }
+        value = JSON.parse(body)
+        value["lease_token"] = "y" * 43
         response.last.close if response.last.respond_to?(:close)
         [
           response.first,
@@ -513,7 +547,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     requests = []
     app =
       observed_app(requests) do |response|
-        travel 290.seconds
+        freeze_time(Time.current + 290.seconds)
         response
       end
     with_runtime(app: app) do |context, journal|
@@ -540,7 +574,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     end
     original_expiry =
       @installation.mutations.find_by!(route_id: "V4-15").private_response
-    travel 301.seconds
+    freeze_time(Time.current + 301.seconds)
     with_runtime do |context, journal|
       expect {
         authority(context, journal, lease).guard!(operation: :mutate)
@@ -599,7 +633,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       expect(requests.length).to eq(1)
       pending = state.fetch("pending")
       limited = false
-      travel 11.seconds
+      freeze_time(Time.current + 11.seconds)
       held.guard!(operation: :mutate)
       expect(JSON.parse(requests[1]).fetch("mutation_id")).to eq(
         pending.fetch("mutation_id")

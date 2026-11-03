@@ -87,7 +87,7 @@ module DiscussionBridgeGhost
     # and needs the exact native ID from a retained native receipt. Neither
     # terminal history nor a synchronized lease permits another native create.
     def guard!(operation:, native_id: nil)
-      unless %i[mutate verify].include?(operation)
+      if %i[mutate verify].exclude?(operation)
         raise Error.new("work_authority_unavailable")
       end
       if native_id &&
@@ -203,13 +203,13 @@ module DiscussionBridgeGhost
         if row
           retained = row.private_payload
           original_native = retained.fetch("initial_native_id")
-          unless original_native.nil? ||
-                   (
-                     original_native.is_a?(String) &&
-                       /\A[a-f0-9]{24}\z/.match?(original_native)
-                   )
-            raise Error.new("identity_conflict")
-          end
+          valid_original =
+            original_native.nil? ||
+              (
+                original_native.is_a?(String) &&
+                  /\A[a-f0-9]{24}\z/.match?(original_native)
+              )
+          raise Error.new("identity_conflict") unless valid_original
           # A synchronized mapping may now contain the ID assigned after this
           # work started. Keep the original baseline; guard!(:verify) requires
           # that ID separately from the retained native intent/receipt.
