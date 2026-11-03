@@ -78,13 +78,13 @@ module DiscussionBridgeGhost
           retained_id = retained_tag && retained_tag["id"]
           valid_id =
             retained_id.is_a?(String) && /\A[a-f0-9]{24}\z/.match?(retained_id)
-          unless retained_tag &&
-                   @fields["tags"].any? { |tag|
-                     (valid_id && tag["id"] == retained_id) ||
-                       tag["name"] == retained_tag["name"]
-                   }
-            raise Error.new("identity_conflict")
-          end
+          preserved_tag =
+            retained_tag &&
+              @fields["tags"].any? do |tag|
+                (valid_id && tag["id"] == retained_id) ||
+                  tag["name"] == retained_tag["name"]
+              end
+          raise Error.new("identity_conflict") unless preserved_tag
         end
         old_root = Nokogiri::HTML5.fragment(old_html, **OwnedFragment::OPTIONS)
         old_section = old_root.at_css("section[data-discussionbridge-owned]")
@@ -94,7 +94,7 @@ module DiscussionBridgeGhost
           raise Error.new("native_fragment_invalid")
         end
         prior_id = old_section["data-discussionbridge-native-id"]
-        unless ["pending", @identity.fetch("native_id")].include?(prior_id)
+        if ["pending", @identity.fetch("native_id")].exclude?(prior_id)
           raise Error.new("identity_conflict")
         end
         prior = fragment_for(old_html, native_id: prior_id)

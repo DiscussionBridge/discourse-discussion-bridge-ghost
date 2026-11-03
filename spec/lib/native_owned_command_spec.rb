@@ -197,6 +197,13 @@ RSpec.describe DiscussionBridgeGhost::NativeOwnedCommand do
       "posts" => [value.fetch("candidate")]
     )
     expect { check(value) }.to raise_error(DiscussionBridgeGhost::Error)
+    value = command
+    value["baseline"]["tags"].first.delete("id")
+    value["candidate"]["tags"] = [{ "name" => "Unrelated tag" }]
+    value["request"]["body_bytes"] = JSON.generate(
+      "posts" => [value.fetch("candidate")]
+    )
+    expect { check(value) }.to raise_error(DiscussionBridgeGhost::Error)
     value = command(create: true)
     mutate_lexical(value) do |tree|
       tree["root"]["children"].unshift(
