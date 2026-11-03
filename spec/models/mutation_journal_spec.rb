@@ -249,24 +249,13 @@ RSpec.describe DiscussionBridgeGhost::MutationJournal do
           "source_content_bytes" => html.bytesize
         }
       )
-    path =
-      File.expand_path(
-        "../../lib/discussion_bridge_ghost/mutation_journal.rb",
-        __dir__
-      )
-    line =
-      File
-        .readlines(path)
-        .find_index do |value|
-          value.include?(
-            '"dispatch_proof" => @transport.actual_source_refusal(result)'
-          )
-        end
-    expect(line).not_to eq(nil)
     collected = false
+    # Ruby3.4 need not emit a line event for a Hash value expression. Trigger
+    # collection at the actual consuming method entry, before proof lookup.
     trace =
-      TracePoint.new(:line) do |event|
-        if event.path == path && event.lineno == line + 1
+      TracePoint.new(:call) do |event|
+        if event.defined_class == DiscussionBridgeGhost::RackTransport &&
+             event.method_id == :actual_source_refusal
           trace.disable
           3.times { GC.start(full_mark: true, immediate_sweep: true) }
           collected = true

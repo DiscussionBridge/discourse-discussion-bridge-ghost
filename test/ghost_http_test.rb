@@ -335,6 +335,7 @@ class GhostNativeHttpTest < Minitest::Test
   end
 
   def with_interruption_at(fragment)
+    fired = false
     path =
       File.expand_path("../lib/discussion_bridge_ghost/ghost_http.rb", __dir__)
     line = File.readlines(path).find_index { |value| value.include?(fragment) }
@@ -343,6 +344,7 @@ class GhostNativeHttpTest < Minitest::Test
       TracePoint.new(:line) do |event|
         if event.path == path && event.lineno == line + 1
           trace.disable
+          fired = true
           raise Timeout::Error
         end
       end
@@ -350,6 +352,7 @@ class GhostNativeHttpTest < Minitest::Test
     yield
   ensure
     trace&.disable
+    assert fired, "deadline injection must execute"
   end
 
   def test_interrupted_duplicate_never_creates_no_send_for_the_previous_dispatched_attempt

@@ -805,20 +805,13 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
   end
 
   def interrupted_duplicate(http, command, attempt)
-    path =
-      File.expand_path(
-        "../../lib/discussion_bridge_ghost/ghost_http.rb",
-        __dir__
-      )
-    line =
-      File
-        .readlines(path)
-        .find_index { |value| value.include?("if @dispatches.key?(key)") }
-    expect(line).not_to eq(nil)
+    fired = false
+    registry = http.instance_variable_get(:@dispatches)
     trace =
-      TracePoint.new(:line) do |event|
-        if event.path == path && event.lineno == line + 1
+      TracePoint.new(:c_call) do |event|
+        if event.self.equal?(registry) && event.method_id == :key?
           trace.disable
+          fired = true
           raise Timeout::Error
         end
       end
@@ -826,6 +819,7 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
     send_command(http, command, attempt)
   ensure
     trace&.disable
+    expect(fired).to eq(true)
   end
 
   it "refuses interrupted duplicate proof through the actual durable journal without clearing the sent attempt" do
