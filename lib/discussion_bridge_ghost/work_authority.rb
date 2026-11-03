@@ -55,6 +55,7 @@ module DiscussionBridgeGhost
       @protocol.validate!("Mapping", mapping)
       @protocol.validate!("Revision", scope_revision)
       @identity = copy(lease.fetch("work").slice(*WORK_FIELDS)).freeze
+      validate_work_identity!(@identity)
       @mapping = copy(mapping.slice(*MAPPING_FIELDS)).freeze
       @scope_revision = scope_revision.dup.freeze
       @initial_native_id = mapping.fetch("destination_native_id")&.dup&.freeze
@@ -202,6 +203,7 @@ module DiscussionBridgeGhost
         row = find_record("work_authority", @key)
         if row
           retained = row.private_payload
+          raise Error.new("identity_conflict") unless retained.is_a?(Hash)
           original_native = retained.fetch("initial_native_id")
           valid_original =
             original_native.nil? ||
@@ -235,7 +237,8 @@ module DiscussionBridgeGhost
         raise Error.new("identity_conflict")
       end
       @protocol.validate!("UInt", state.fetch("next_renewal"))
-      if (pending = state.fetch("pending"))
+      pending = state.fetch("pending")
+      unless pending.nil?
         unless pending.is_a?(Hash) &&
                  pending.keys.sort == %w[mutation_id operation_key] &&
                  pending.fetch("operation_key") == renewal_key(state)
@@ -243,7 +246,11 @@ module DiscussionBridgeGhost
         end
         @protocol.validate!("UUID", pending.fetch("mutation_id"))
       end
-      validate_lease!(state.fetch("last_lease")) if state.fetch("last_lease")
+      last_lease = state.fetch("last_lease")
+      unless (state.fetch("next_renewal") == 0) == last_lease.nil?
+        raise Error.new("identity_conflict")
+      end
+      validate_lease!(last_lease) unless last_lease.nil?
       state
     end
 
@@ -317,7 +324,15 @@ module DiscussionBridgeGhost
 
     def assert_fence!
       row = find_record("mapping_fence", @identity.fetch("mapping_id"))
-      return unless row
+      unless row
+        # A completed local checkpoint and its fence are one atomic commit.
+        # Absence is valid before that first success, not after a restore has
+        # lost the fence. Preserve the inconsistency for explicit reconciliation.
+        if checkpoint.fetch("next_renewal") > 0 || @initial_native_id
+          raise Error.new("identity_conflict")
+        end
+        return
+      end
       fence = row.private_payload
       unless fence.is_a?(Hash) &&
                fence.keys.sort == %w[binding generation identity] &&
@@ -325,6 +340,15 @@ module DiscussionBridgeGhost
         raise Error.new("identity_conflict")
       end
       @protocol.validate!("PositiveUInt", fence.fetch("generation"))
+      validate_work_identity!(fence.fetch("identity"))
+      unless fence.fetch("identity").fetch("lease_generation") ==
+               fence.fetch("generation") &&
+               fence.fetch("identity").fetch("mapping_id") ==
+                 @identity.fetch("mapping_id") &&
+               fence.fetch("identity").fetch("source_id") ==
+                 @identity.fetch("source_id")
+        raise Error.new("identity_conflict")
+      end
       held = @identity.fetch("lease_generation")
       if held < fence.fetch("generation") ||
            (
@@ -332,6 +356,30 @@ module DiscussionBridgeGhost
                fence.fetch("identity") != @identity
            )
         raise Error.new("work_authority_unavailable")
+      end
+    end
+
+    def validate_work_identity!(identity)
+      unless identity.is_a?(Hash) && identity.keys.sort == WORK_FIELDS.sort
+        raise Error.new("identity_conflict")
+      end
+      %w[work_id mapping_id attempt_cycle].each do |field|
+        @protocol.validate!("UUID", identity.fetch(field))
+      end
+      @protocol.validate!("OpaqueId", identity.fetch("source_id"))
+      @protocol.validate!("Revision", identity.fetch("policy_revision"))
+      @protocol.validate!("PositiveUInt", identity.fetch("lease_generation"))
+      @protocol.validate!("PositiveUInt", identity.fetch("attempt"))
+      raise Error.new("identity_conflict") if identity.fetch("attempt") > 3
+      case identity.fetch("action")
+      when "publish_revision"
+        @protocol.validate!("Revision", identity.fetch("source_revision"))
+      when "withdraw"
+        unless identity.fetch("source_revision").nil?
+          raise Error.new("identity_conflict")
+        end
+      else
+        raise Error.new("identity_conflict")
       end
     end
 

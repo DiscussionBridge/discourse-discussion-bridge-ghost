@@ -216,6 +216,52 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       .private_payload
   end
 
+  def rewrite_record(row, payload)
+    row.update!(
+      encrypted_payload:
+        @installation.envelope.encrypt(
+          "operational_record",
+          payload,
+          binding: JSON.generate([row.kind, row.record_key])
+        )
+    )
+  end
+
+  def retained_evidence
+    [
+      @installation
+        .operational_records
+        .order(:id)
+        .pluck(:id, :kind, :record_key, :encrypted_payload),
+      @installation
+        .mutations
+        .order(:id)
+        .pluck(
+          :id,
+          :operation_key,
+          :request_ciphertext,
+          :response_ciphertext,
+          :state
+        )
+    ]
+  end
+
+  def next_work!
+    @work.update!(
+      state: "cancelled",
+      lease_verifier: nil,
+      lease_expires_at: nil
+    )
+    @mapping.work_items.create!(
+      work_id: SecureRandom.uuid,
+      attempt_cycle: SecureRandom.uuid,
+      action: "publish_revision",
+      source_revision: @work.source_revision,
+      policy_revision: @work.policy_revision,
+      source_snapshot: @snapshot
+    )
+  end
+
   def observed_app(requests, &after_response)
     lambda do |env|
       if env.fetch("PATH_INFO").end_with?("/renew.json")
@@ -519,6 +565,11 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
 
   it "supports current owned withdrawal while publishing remains enabled and the source is ineligible" do
     native_id = "b" * 24
+    # Retained local fence precedes this synthetic owned native publication.
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      authority(context, journal, lease).guard!(operation: :mutate)
+    end
     @work.update!(state: "cancelled")
     @mapping.update!(destination_native_id: native_id)
     config = @connection.cms_configuration.deep_dup
@@ -531,7 +582,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         action: "withdraw"
       )
     with_runtime do |context, journal|
-      lease = claim(context, journal)
+      lease = claim(context, journal, key: "claim:withdrawal")
       expect(lease.fetch("work").fetch("work_id")).to eq(withdrawn.work_id)
       expect(lease.fetch("work").fetch("source_revision")).to eq(nil)
       expect(
@@ -710,5 +761,169 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         raise ActiveRecord::Rollback
       end
     end
+  end
+
+  it "rejects non-object restored checkpoints without rewriting history or dispatching renewal" do
+    lease = nil
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      authority(context, journal, lease)
+    end
+    row = @installation.operational_records.find_by!(kind: "work_authority")
+    [nil, false, true, [], "not-a-checkpoint", 7].each do |malformed|
+      rewrite_record(row, malformed)
+      before = retained_evidence
+      requests = []
+      with_runtime(app: observed_app(requests)) do |context, journal|
+        expect { authority(context, journal, lease) }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+      end
+      expect(requests).to eq([])
+      expect(retained_evidence).to eq(before)
+    end
+  end
+
+  it "requires exact nullable object types and counter/last-lease consistency" do
+    lease = nil
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      authority(context, journal, lease).guard!(operation: :mutate)
+    end
+    row = @installation.operational_records.find_by!(kind: "work_authority")
+    original = row.private_payload
+    malformed_states = []
+    %w[pending last_lease].each do |field|
+      [false, true, [], "not-an-object", 1].each do |value|
+        malformed_states << original.deep_dup.merge(field => value)
+      end
+    end
+    malformed_states << original.deep_dup.merge("last_lease" => nil)
+    malformed_states << original.deep_dup.merge("next_renewal" => 0)
+    malformed_states.each do |malformed|
+      rewrite_record(row, malformed)
+      before = retained_evidence
+      requests = []
+      with_runtime(app: observed_app(requests)) do |context, journal|
+        expect { authority(context, journal, lease) }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+      end
+      expect(requests).to eq([])
+      expect(retained_evidence).to eq(before)
+    end
+  end
+
+  it "validates an older fence's complete identity before a higher generation can supersede it" do
+    lease = nil
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      authority(context, journal, lease).guard!(operation: :mutate)
+    end
+    next_work!
+    newer = nil
+    with_runtime do |context, journal|
+      newer = claim(context, journal, key: "claim:higher-for-corruption-check")
+    end
+    row = @installation.operational_records.find_by!(kind: "mapping_fence")
+    original = row.private_payload
+    expect(newer.fetch("lease_generation")).to be > original.fetch("generation")
+    malformed_fences = [nil, false, [], "not-a-fence"]
+    [nil, false, [], "not-an-identity", {}].each do |identity|
+      malformed_fences << original.deep_dup.merge("identity" => identity)
+    end
+    {
+      "mapping_id" => SecureRandom.uuid,
+      "source_id" => "topic:wrong-source",
+      "lease_generation" => original.fetch("generation") + 1,
+      "work_id" => "not-a-uuid",
+      "attempt_cycle" => "not-a-cycle",
+      "attempt" => 0,
+      "action" => "not-an-action",
+      "source_revision" => nil,
+      "policy_revision" => false
+    }.each do |field, value|
+      malformed = original.deep_dup
+      malformed.fetch("identity")[field] = value
+      malformed_fences << malformed
+    end
+    malformed_fences << original.deep_dup.merge("generation" => 0)
+    malformed = original.deep_dup
+    malformed.fetch("binding")["connection_id"] = "dbc_#{SecureRandom.hex(12)}"
+    malformed_fences << malformed
+    malformed_fences.each do |value|
+      rewrite_record(row, value)
+      before = retained_evidence
+      requests = []
+      with_runtime(app: observed_app(requests)) do |context, journal|
+        expect { authority(context, journal, newer) }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+      end
+      expect(requests).to eq([])
+      expect(retained_evidence).to eq(before)
+    end
+  end
+
+  it "rejects a missing fence contradicted by completed local checkpoint history" do
+    lease = nil
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      authority(context, journal, lease).guard!(operation: :mutate)
+    end
+    @installation.operational_records.find_by!(kind: "mapping_fence").delete
+    before = retained_evidence
+    requests = []
+    with_runtime(app: observed_app(requests)) do |context, journal|
+      expect { authority(context, journal, lease) }.to raise_error(
+        DiscussionBridgeGhost::Error,
+        /identity/
+      )
+    end
+    expect(requests).to eq([])
+    expect(retained_evidence).to eq(before)
+  end
+
+  it "rejects a missing prior fence for a new work item with an already-owned native ID" do
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      authority(context, journal, lease).guard!(operation: :mutate)
+    end
+    @mapping.update!(destination_native_id: "a" * 24)
+    next_work!
+    newer = nil
+    with_runtime do |context, journal|
+      newer = claim(context, journal, key: "claim:owned-native-missing-fence")
+    end
+    @installation.operational_records.find_by!(kind: "mapping_fence").delete
+    before = retained_evidence
+    requests = []
+    with_runtime(app: observed_app(requests)) do |context, journal|
+      expect { authority(context, journal, newer) }.to raise_error(
+        DiscussionBridgeGhost::Error,
+        /identity/
+      )
+    end
+    expect(requests).to eq([])
+    expect(retained_evidence).to eq(before)
+  end
+
+  it "rejects a different work identity at the same retained mapping generation" do
+    lease = nil
+    with_runtime do |context, journal|
+      lease = claim(context, journal)
+      authority(context, journal, lease).guard!(operation: :mutate)
+    end
+    conflicting = JSON.parse(JSON.generate(lease))
+    conflicting.fetch("work")["work_id"] = SecureRandom.uuid
+    before = retained_evidence
+    requests = []
+    with_runtime(app: observed_app(requests)) do |context, journal|
+      expect { authority(context, journal, conflicting) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+    end
+    expect(requests).to eq([])
+    expect(retained_evidence).to eq(before)
   end
 end

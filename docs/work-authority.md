@@ -33,6 +33,13 @@ for them. Public URLs, resource/source/external/mapping identities and mode are
 compared, not silently rebound. Later explicit URL-management orchestration must
 retain its separately verified movement rules.
 
+Restored checkpoint values must retain their exact nullable object types and
+counter/last-lease relationship. Every stored fence identity is validated even
+when its generation is older than the incoming work. A missing fence is not
+treated as first use when a completed local checkpoint or already-owned native
+baseline proves earlier execution. These inconsistencies stop for reconciliation;
+the helper does not repair rows, reset counters or manufacture empty history.
+
 The guard requires the operation stage: native mutation only while `leased`;
 public verification only while `synchronized`, with the native ID supplied from
 the retained native intent/receipt. A newly synchronized mapping is not an
