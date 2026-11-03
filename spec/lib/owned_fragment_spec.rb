@@ -159,6 +159,14 @@ RSpec.describe DiscussionBridgeGhost::OwnedFragment do
       publication(parser).sub(
         "ghost-owned-fragment-v2",
         "ghost-owned-fragment-v1"
+      ),
+      publication(parser).sub(
+        'data-discussionbridge-mode="full"',
+        'data-discussionbridge-mode="unknown"'
+      ),
+      publication(parser).sub(
+        'data-discussionbridge-source-revision="source-1"',
+        'data-discussionbridge-source-revision=""'
       )
     ].each do |value|
       expect { parser.extract(value) }.to raise_error(

@@ -118,6 +118,13 @@ module DiscussionBridgeGhost
           section.parent == ending.first.parent
       )
       assert!(section.name == "section" && namespace(section) == HTML_NAMESPACE)
+      revision = section["data-discussionbridge-source-revision"]
+      assert!(revision.is_a?(String) && !revision.empty?)
+      assert!(
+        %w[simple full interactive].include?(
+          section["data-discussionbridge-mode"]
+        )
+      )
       attributes
         .merge(expected)
         .each do |name, value|
