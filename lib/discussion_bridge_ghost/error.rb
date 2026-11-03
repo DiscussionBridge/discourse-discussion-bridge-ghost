@@ -15,6 +15,10 @@ module DiscussionBridgeGhost
       "protocol_mismatch" =>
         "The installed connector and receiver protocol identities do not match.",
       "response_invalid" => "The upstream response is invalid.",
+      "ghost_http_failed" =>
+        "The Ghost API request failed; retained native work must be reconciled before retrying a write.",
+      "ghost_rate_limited" =>
+        "Ghost has limited API requests. Wait for its reported cooldown before retrying.",
       "native_lock_busy" =>
         "This Ghost installation already has a native writer.",
       "native_lock_lost" => "The Ghost native writer no longer owns its lock.",

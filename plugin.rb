@@ -40,6 +40,8 @@ after_initialize do
     wire_protocol
     rack_transport
     mutation_journal
+    ghost_http
+    ghost_admin_client
   ].each { |name| require_relative "lib/discussion_bridge_ghost/#{name}" }
   %w[native_target installation operational_record mutation].each do |name|
     require_relative "app/models/discussion_bridge_ghost/#{name}"
