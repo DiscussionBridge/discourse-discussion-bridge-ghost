@@ -273,16 +273,15 @@ module DiscussionBridgeGhost
           descriptor = value[first...position].strip
           position += 1 if position < value.length
         end
-        unless !url.empty? &&
-                 (
-                   descriptor.empty? ||
-                     /\A(?:[1-9][0-9]*w|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)x)\z/.match?(
-                       descriptor
-                     ) &&
-                       (!descriptor.end_with?("x") || descriptor.to_f.positive?)
-                 )
-          raise Limitation.new(functions: ["source srcset syntax"])
-        end
+        valid =
+          !url.empty? &&
+            (
+              descriptor.empty? ||
+                /\A(?:[1-9][0-9]*w|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)x)\z/.match?(
+                  descriptor
+                ) && (!descriptor.end_with?("x") || descriptor.to_f.positive?)
+            )
+        raise Limitation.new(functions: ["source srcset syntax"]) unless valid
         candidates << anchor(url) + (descriptor.empty? ? "" : " #{descriptor}")
       end
       candidates.join(", ")

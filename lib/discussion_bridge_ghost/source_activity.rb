@@ -23,20 +23,20 @@ module DiscussionBridgeGhost
           /\A(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})\z/.match(
             value
           )
-      unless parts &&
-               Date.valid_date?(
-                 parts[1].to_i,
-                 parts[2].to_i,
-                 parts[3].to_i,
-                 Date::GREGORIAN
-               ) && parts[4].to_i <= 23 && parts[5].to_i <= 59 &&
-               parts[6].to_i <= 59 &&
-               (
-                 parts[8] == "Z" ||
-                   (parts[8][1, 2].to_i <= 23 && parts[8][4, 2].to_i <= 59)
-               )
-        raise Error.new("native_source_unavailable")
-      end
+      valid =
+        parts &&
+          Date.valid_date?(
+            parts[1].to_i,
+            parts[2].to_i,
+            parts[3].to_i,
+            Date::GREGORIAN
+          ) && parts[4].to_i <= 23 && parts[5].to_i <= 59 &&
+          parts[6].to_i <= 59 &&
+          (
+            parts[8] == "Z" ||
+              (parts[8][1, 2].to_i <= 23 && parts[8][4, 2].to_i <= 59)
+          )
+      raise Error.new("native_source_unavailable") unless valid
       Time.iso8601(value).utc
     rescue ArgumentError, TypeError
       raise Error.new("native_source_unavailable"), cause: nil
