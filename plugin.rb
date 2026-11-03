@@ -42,6 +42,8 @@ after_initialize do
     mutation_journal
     ghost_http
     ghost_admin_client
+    owned_fragment
+    owned_lexical
   ].each { |name| require_relative "lib/discussion_bridge_ghost/#{name}" }
   %w[native_target installation operational_record mutation].each do |name|
     require_relative "app/models/discussion_bridge_ghost/#{name}"
