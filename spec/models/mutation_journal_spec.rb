@@ -17,14 +17,21 @@ RSpec.describe DiscussionBridgeGhost::MutationJournal do
         @observer_pool = base.connection_pool
         example.run
       ensure
-        if @installation&.persisted?
-          @installation.operational_records.delete_all
-          @installation.mutations.delete_all
-          @installation.delete
+        begin
+          if @installation&.persisted?
+            DiscussionBridgeGhost::OperationalRecord.where(
+              installation_id: @installation.id
+            ).delete_all
+            DiscussionBridgeGhost::Mutation.where(
+              installation_id: @installation.id
+            ).delete_all
+            @installation.delete
+          end
+          @target.delete if @target&.persisted?
+        ensure
+          @observer_pool&.disconnect!
+          base.remove_connection
         end
-        @target.delete if @target&.persisted?
-        @observer_pool&.disconnect!
-        base.remove_connection
       end
     end
   end
@@ -32,11 +39,12 @@ RSpec.describe DiscussionBridgeGhost::MutationJournal do
   before do
     SiteSetting.discussion_bridge_ghost_enabled = true
     SiteSetting.force_https = true
+    suffix = SecureRandom.hex(8)
     @target =
       DiscussionBridgeGhost::NativeTarget.create!(
         public_id: SecureRandom.uuid,
-        ghost_origin: "https://ghost-native.example",
-        admin_origin: "https://ghost-admin.example"
+        ghost_origin: "https://ghost-native-#{suffix}.example",
+        admin_origin: "https://ghost-admin-#{suffix}.example"
       )
     id = SecureRandom.uuid
     envelope =

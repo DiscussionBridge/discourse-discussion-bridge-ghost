@@ -65,8 +65,7 @@ RSpec.describe DiscussionBridgeGhost::NativeTarget do
   end
 end
 
-RSpec.describe DiscussionBridgeGhost::NativeTarget,
-               "concurrent identity reservation" do
+RSpec.describe DiscussionBridgeGhost::NativeTarget do
   self.use_transactional_tests = false
 
   it "enforces canonical identity in PostgreSQL even after two writers validate" do
