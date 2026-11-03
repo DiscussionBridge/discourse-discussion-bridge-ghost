@@ -1,0 +1,19 @@
+name: Native Ghost connector
+
+on:
+  push:
+    branches:
+      - main
+      - 'codex/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    uses: discourse/.github/.github/workflows/discourse-plugin.yml@bee9ee78c8e6fd574a8496f415e08c6eb412d3df
+    with:
+      core_ref: acf8e70129f5359635f8227ad8a91a792204147e
+      container: discourse/discourse_test@sha256:5df460f3592a1adacc924775b6c690191572d8efe9e51d3f823c38c092d9f6a3

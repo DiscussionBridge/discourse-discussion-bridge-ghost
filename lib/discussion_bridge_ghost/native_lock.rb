@@ -17,18 +17,25 @@ module DiscussionBridgeGhost
 
     def self.synchronize(native_target_id, pool: ActiveRecord::Base.connection_pool)
       selected = key(native_target_id)
-      pool.with_connection do |connection|
+      # A dedicated checkout is not the thread's normal ORM lease. Nested Rack
+      # executor cleanup must not return this lock-holding session to the pool.
+      connection = pool.checkout
+      lease = nil
+      acquired = false
+      begin
         raise Error.new("native_lock_lost") unless connection.adapter_name == "PostgreSQL"
         acquired = connection.select_value("SELECT pg_try_advisory_lock(#{selected})")
         raise Error.new("native_lock_busy") unless acquired == true
         lease = Lease.new(connection, selected)
+        lease.assert!
+        yield lease
+      ensure
         begin
-          lease.assert!
-          yield lease
-        ensure
           # Never unlock an unrelated replacement session. Loss is not success;
           # the caller retains its exact intent/receipt for reconciliation.
-          connection.select_value("SELECT pg_advisory_unlock(#{selected})") if lease.same_session?
+          connection.select_value("SELECT pg_advisory_unlock(#{selected})") if acquired && lease&.same_session?
+        ensure
+          pool.checkin(connection)
         end
       end
     end
