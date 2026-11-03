@@ -30,6 +30,18 @@ unrelated public-theme errors cannot authorize altered owned content. Public
 owned section must match its independently parsed raw span and expected content.
 This extractor is NOT the source-preservation or sanitizer implementation.
 
+Inline inactivity inspection uses Core's existing Crass 1.0.7 dependency,
+`parse_properties` with `maximum_depth: 25`, `preserve_comments: false` and
+`preserve_hacks: false`. The constructor requires this qualified version too;
+no new gem/hosting extension is installed. Parsed CSS errors/bad-string/bad-URL
+tokens fail closed. A `display` or `visibility` property whose significant value
+is the single decoded identifier `none` or `hidden`, respectively, is rejected,
+including comment, escape, whitespace, case and `!important` spellings. Tokens
+are not joined across comments to invent a keyword (`n/**/one` is not `none`).
+This is inspection only: original style/HTML bytes are not rewritten. Variables,
+external rules, media/layout and computed visibility require browser checks;
+this is not a new sanitizer or global CSS policy.
+
 ## Retained binding and delimiters
 
 One binding contains canonical lowercase resource UUID, native kind `post` or
@@ -108,6 +120,16 @@ span with the prepared replacement span. Preserve every other Lexical value,
 card property, unrelated card, and exact decoded HTML prefix/suffix byte. This
 does not claim identical outer JSON escaping/key order. Never rewrap rendered
 Ghost HTML or serialize a full DOM/card to effect an update.
+
+Before returning replacement bytes, re-extract the complete assembled card with
+the desired binding. Require the desired canonical hash, exact inserted span
+bytes, and expected byte start/end. Separately valid operands are insufficient:
+HTML5 context can repair or relocate nested structures after concatenation.
+Lexical replacement also simulates the same splice in the retained rendered
+HTML and validates that combined context, including surrounding other cards.
+Any repair/ambiguity/limit failure stops preparation; do not remove or normalize
+unrelated wrappers to make it succeed. Pending-to-real transition uses the
+explicit retained prior binding while the result is checked under the real ID.
 
 Persist old baseline/markers, desired exact bytes and expected native revision
 before CAS. Unknown create/update outcomes inspect both posts AND pages using

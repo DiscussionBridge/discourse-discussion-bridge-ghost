@@ -72,6 +72,15 @@ module DiscussionBridgeGhost
       check!(desired.start_byte.zero? && desired.end_byte == html.bytesize)
       rendered = prior_fragment.extract(current["html"])
       check!(rendered.sha256 == baseline_sha256)
+      # Other native HTML cards can contribute surrounding parse context too.
+      # Validate the proposed span in the actual retained rendered context as
+      # well as in its selected card, before preparing any native payload.
+      @fragment.replace_span(
+        current["html"],
+        html,
+        baseline_sha256: baseline_sha256,
+        prior_fragment: prior_fragment
+      )
       document = parse(current["lexical"])
       root = document["root"]
       check!(
@@ -95,14 +104,15 @@ module DiscussionBridgeGhost
         matches << [node, span]
       end
       check!(matches.length == 1)
-      card, span = matches.first
-      bytes = card["html"].b
+      card, _span = matches.first
       # Replacement may change pending -> real native ID. Both exact bindings
       # are explicit above; no other native object, nonce or profile is admitted.
-      card["html"] = (
-        bytes.byteslice(0, span.start_byte) + desired.html.b +
-          bytes.byteslice(span.end_byte, bytes.bytesize - span.end_byte)
-      ).force_encoding(Encoding::UTF_8)
+      card["html"] = @fragment.replace_span(
+        card["html"],
+        html,
+        baseline_sha256: rendered.sha256,
+        prior_fragment: prior_fragment
+      )
       encoded = JSON.generate(document)
       check!(encoded.bytesize <= @fragment.maximum_bytes)
       encoded

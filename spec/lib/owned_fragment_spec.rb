@@ -232,6 +232,93 @@ RSpec.describe DiscussionBridgeGhost::OwnedFragment do
     expect(JSON.parse(native["lexical"])).to eq(data)
   end
 
+  it "rejects replacements that repair the owned DOM only after combining valid contexts" do
+    parser = fragment
+    before = publication(parser)
+    [
+      %w[<form> </form> <form><p>Updated</p></form>],
+      ['<a href="/outer">', "</a>", '<a href="/inner">Updated</a>']
+    ].each do |prefix, suffix, body|
+      original = prefix + before + suffix
+      after = publication(parser, body, revision: "source-2")
+      baseline = parser.extract(original).sha256
+      expect(parser.extract(after).sha256).not_to eq(baseline)
+      # Actual pinned-parser control, independent of either replacement path.
+      expect { parser.extract(prefix + after + suffix) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect {
+        parser.replace_span(original, after, baseline_sha256: baseline)
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      [before, original].each do |rendered|
+        native = current(parser, before)
+        data = JSON.parse(native["lexical"])
+        data["root"]["children"][0]["html"] = original
+        native["lexical"] = JSON.generate(data)
+        native["html"] = rendered
+        expect {
+          DiscussionBridgeGhost::OwnedLexical.new(fragment: parser).replace(
+            current: native,
+            html: after,
+            expected_revision: native["updated_at"],
+            baseline_sha256: baseline
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        expect(JSON.parse(native["lexical"])).to eq(data)
+      end
+    end
+  end
+
+  it "rejects commented and escaped inline hidden declarations without changing source bytes" do
+    parser = fragment
+    owned = publication(parser)
+    [
+      "display:/**/none",
+      'd\69splay:none',
+      'display:n\6f ne',
+      "visibility:/**/hidden",
+      'v\69sibility:hidden',
+      'visibility:h\69 dden',
+      " DiSpLaY : /**/ NONE !important; color:red"
+    ].each do |style|
+      value = "<div style=\"#{CGI.escapeHTML(style)}\">#{owned}</div>"
+      saved = value.dup
+      error = nil
+      expect { parser.extract(value) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      ) { |failure| error = failure }
+      expect(error.code).to eq("native_fragment_invalid")
+      expect(error.cause).to eq(nil)
+      expect(error.message).not_to include(style)
+      expect(value.b).to eq(saved.b)
+    end
+  end
+
+  it "preserves visible inline comments escapes strings and harmless wrappers exactly" do
+    parser = fragment
+    before = publication(parser)
+    after = publication(parser, "<p>Updated</p>", revision: "source-2")
+    [
+      "display:/**/block",
+      'd\69splay:block',
+      "visibility:/**/visible",
+      "display:n/**/one",
+      'display:"none"',
+      "margin:0; color:red"
+    ].each do |style|
+      prefix = "<div style=\"#{CGI.escapeHTML(style)}\"><p>é🐕</p>"
+      suffix = "<p>尾</p></div>"
+      original = prefix + before + suffix
+      result =
+        parser.replace_span(
+          original,
+          after,
+          baseline_sha256: parser.extract(original).sha256
+        )
+      expect(result.b).to eq(prefix.b + after.b + suffix.b)
+    end
+  end
+
   it "refuses CAS, baseline, card ambiguity, hidden native edits and native type changes" do
     parser = fragment
     html = publication(parser)

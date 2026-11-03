@@ -3,6 +3,7 @@
 require "digest"
 require "json"
 require "nokogiri"
+require "crass"
 
 module DiscussionBridgeGhost
   # Component-defined rendered-content proof, NOT an ownership grant or a
@@ -58,7 +59,8 @@ module DiscussionBridgeGhost
           nonce.is_a?(String) && /\A[a-f0-9]{64}\z/.match?(nonce) &&
           maximum_bytes.is_a?(Integer) && maximum_bytes.positive?
       raise Error.new("identity_conflict") unless valid
-      unless Nokogiri::VERSION == "1.19.4" && Nokogiri.respond_to?(:HTML5)
+      unless Nokogiri::VERSION == "1.19.4" && Nokogiri.respond_to?(:HTML5) &&
+               Gem.loaded_specs["crass"]&.version&.to_s == "1.0.7"
         raise Error.new("native_representation_unavailable")
       end
       @resource_id, @kind, @native_id, @nonce =
@@ -177,10 +179,21 @@ module DiscussionBridgeGhost
 
     # Re-derive both spans from actual bytes. A caller cannot pass an invented
     # offset or snapshot to write outside the validated owned section.
-    def replace_span(original, replacement, baseline_sha256:)
+    def replace_span(
+      original,
+      replacement,
+      baseline_sha256:,
+      prior_fragment: self
+    )
       original = utf8(original).freeze
       replacement = utf8(replacement).freeze
-      before = extract(original)
+      assert!(
+        prior_fragment.is_a?(OwnedFragment) &&
+          prior_fragment.resource_id == @resource_id &&
+          prior_fragment.kind == @kind && prior_fragment.nonce == @nonce &&
+          ["pending", @native_id].include?(prior_fragment.native_id)
+      )
+      before = prior_fragment.extract(original)
       after = extract(replacement)
       assert!(
         before.sha256 == baseline_sha256 && after.start_byte.zero? &&
@@ -190,7 +203,16 @@ module DiscussionBridgeGhost
       changed =
         bytes.byteslice(0, before.start_byte) + after.html.b +
           bytes.byteslice(before.end_byte, bytes.bytesize - before.end_byte)
-      utf8(changed).freeze
+      changed = utf8(changed).freeze
+      # Validity of the operands does not establish validity of their combined
+      # HTML5 context. Reject repair, relocation or loss before returning bytes.
+      observed = extract(changed)
+      assert!(
+        observed.sha256 == after.sha256 && observed.html.b == after.html.b &&
+          observed.start_byte == before.start_byte &&
+          observed.end_byte == before.start_byte + after.html.bytesize
+      )
+      changed
     end
 
     private
@@ -233,8 +255,50 @@ module DiscussionBridgeGhost
         INACTIVE.include?(node.name) || namespace(node) != HTML_NAMESPACE ||
           node.key?("hidden") || node.key?("inert") ||
           node["aria-hidden"].to_s.strip.downcase == "true" ||
-          /(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.match?(style)
+          inline_hidden?(style)
       assert!(!hidden)
+    end
+
+    # Existing Core dependency, inspection only. CSS escape/comment spelling
+    # does not change the explicitly rejected display/visibility keywords.
+    # Variables, stylesheets, media queries and computed visibility are NOT
+    # established here and still need actual browser qualification.
+    def inline_hidden?(style)
+      return false if style.empty?
+      declarations =
+        Crass.parse_properties(
+          style,
+          maximum_depth: 25,
+          preserve_comments: false,
+          preserve_hacks: false
+        )
+      assert!(declarations.is_a?(Array) && !css_error?(declarations))
+      declarations.any? do |declaration|
+        next false unless declaration[:node] == :property
+        keyword =
+          { "display" => "none", "visibility" => "hidden" }[
+            declaration[:name].to_s.downcase
+          ]
+        next false unless keyword
+        parts =
+          declaration
+            .fetch(:children)
+            .reject { |token| %i[whitespace comment].include?(token[:node]) }
+        parts.length == 1 && parts.first[:node] == :ident &&
+          parts.first[:value].to_s.downcase == keyword
+      end
+    end
+
+    def css_error?(value)
+      case value
+      when Hash
+        %i[error bad_string bad_url].include?(value[:node]) ||
+          value.values.any? { |member| css_error?(member) }
+      when Array
+        value.any? { |member| css_error?(member) }
+      else
+        false
+      end
     end
 
     def tokens(node, result = [])
