@@ -75,9 +75,12 @@ module DiscussionBridgeGhost
               tag["name"] ==
                 "#discussionbridge-resource-#{@identity.fetch("resource_id")}"
             end
+          retained_id = retained_tag && retained_tag["id"]
+          valid_id =
+            retained_id.is_a?(String) && /\A[a-f0-9]{24}\z/.match?(retained_id)
           unless retained_tag &&
                    @fields["tags"].any? { |tag|
-                     tag["id"] == retained_tag["id"] ||
+                     (valid_id && tag["id"] == retained_id) ||
                        tag["name"] == retained_tag["name"]
                    }
             raise Error.new("identity_conflict")
