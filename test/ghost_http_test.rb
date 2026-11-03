@@ -318,6 +318,22 @@ class GhostNativeHttpTest < Minitest::Test
                )
   end
 
+  def test_one_attempt_cannot_enter_request_twice_or_obtain_fresh_no_send_after_dispatch
+    http = transport(Incoming.new(201))
+    identity = dispatch_identity
+    result = dispatch_write(http, identity)
+    original = http.actual_dispatch_evidence(result, dispatch: identity)
+    assert_equal "response_received", original.value.fetch("phase")
+    error =
+      assert_raises(DiscussionBridgeGhost::Error) do
+        dispatch_write(http, identity.dup)
+      end
+    assert_nil http.actual_dispatch_evidence(error, dispatch: identity)
+    assert_same original,
+                http.actual_dispatch_evidence(result, dispatch: identity)
+    assert_equal 1, @connection.requests.length
+  end
+
   def test_public_verification_never_sends_private_credentials
     http =
       transport(

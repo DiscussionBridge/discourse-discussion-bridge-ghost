@@ -63,6 +63,7 @@ module DiscussionBridgeGhost
         factory ||
           ->(host, port) { ::FinalDestination::HTTP.new(host, port, nil) }
       @dispatch_evidence = ObjectSpace::WeakMap.new
+      @dispatches = {}
     end
 
     def bound_origin?(protocol:, origin:)
@@ -140,6 +141,14 @@ module DiscussionBridgeGhost
               retained_body,
               authenticated: authenticated
             )
+          key = descriptor.fetch("dispatch")
+          if @dispatches.key?(key) || @dispatches.size >= 10_000
+            # Duplicate invocation is not another no-send result for an older
+            # attempt. Refuse WITHOUT issuing transferable dispatch evidence.
+            descriptor = nil
+            raise Error.new("identity_conflict")
+          end
+          @dispatches[key] = true
           method = descriptor.fetch("method")
         end
       end
