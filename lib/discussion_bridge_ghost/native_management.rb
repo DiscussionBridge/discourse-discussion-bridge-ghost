@@ -116,7 +116,8 @@ module DiscussionBridgeGhost
     def validate_command!(command)
       fields = NativeDocument.new(command).fields
       owner = command.fetch("owner")
-      allowed = @value.fetch("scalar_fields") + %w[id updated_at lexical]
+      allowed = @value.fetch("scalar_fields") + %w[id updated_at]
+      allowed << "lexical" unless @value.fetch("stage") == "withdraw"
       allowed += %w[authors tags] if @value.fetch("stage") == "publish"
       allowed << "tags" if @value.fetch("stage") == "create_draft"
       unless owner.fetch("direction") == "from_discourse" &&

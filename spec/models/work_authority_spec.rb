@@ -381,6 +381,10 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       "status" => action == "publish" ? "published" : "draft",
       "lexical" => lexical
     }
+    if action == "withdraw"
+      fields = { "status" => "draft" }
+      html = baseline.fetch("html")
+    end
     if create
       fields["tags"] = [
         { "name" => "#discussionbridge-resource-#{@record.resource_id}" }
@@ -419,7 +423,14 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
           "allowed_statuses" => create ? [201] : [200]
         },
         baseline: baseline,
-        candidate: fields
+        candidate:
+          (
+            if action == "withdraw"
+              fields.merge("slug" => baseline.fetch("slug"))
+            else
+              fields
+            end
+          )
       },
       html
     ]

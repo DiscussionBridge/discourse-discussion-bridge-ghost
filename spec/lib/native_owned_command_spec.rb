@@ -190,6 +190,60 @@ RSpec.describe DiscussionBridgeGhost::NativeOwnedCommand do
     expect { check(value) }.to raise_error(DiscussionBridgeGhost::Error)
   end
 
+  it "withdraws only by native status/CAS while retaining original article, mode, command marker and editor content" do
+    value = command
+    old = Marshal.load(Marshal.dump(value.fetch("baseline")))
+    value["owner"].merge!("action" => "withdraw", "source_revision" => nil)
+    fields = {
+      "id" => NATIVE,
+      "status" => "draft",
+      "updated_at" => old.fetch("updated_at")
+    }
+    value["candidate"] = fields.merge("slug" => old.fetch("slug"))
+    value["request"]["body_bytes"] = JSON.generate("posts" => [fields])
+    expect(check(value, mode: "simple")).to eq(true)
+    expect(value.fetch("baseline")).to eq(old)
+    expect(fields).not_to have_key("lexical")
+    %w[lexical title slug authors tags published_at visibility].each do |extra|
+      changed = Marshal.load(Marshal.dump(value))
+      native =
+        fields.merge(
+          extra =>
+            (
+              if extra == "lexical"
+                old.fetch("lexical")
+              else
+                "Unrequested replacement"
+              end
+            )
+        )
+      changed["candidate"].merge!(native)
+      changed["request"]["body_bytes"] = JSON.generate("posts" => [native])
+      expect { check(changed) }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+  end
+
+  it "refuses status-only withdrawal when native identity or owned rendered/Lexical baseline disagrees" do
+    value = command
+    value["owner"].merge!("action" => "withdraw", "source_revision" => nil)
+    fields = {
+      "id" => NATIVE,
+      "status" => "draft",
+      "updated_at" => value.dig("baseline", "updated_at")
+    }
+    value["candidate"] = fields.merge("slug" => value.dig("baseline", "slug"))
+    value["request"]["body_bytes"] = JSON.generate("posts" => [fields])
+    changed = Marshal.load(Marshal.dump(value))
+    changed["baseline"]["html"].sub!("Owned body", "Different rendered body")
+    expect { check(changed) }.to raise_error(DiscussionBridgeGhost::Error)
+    changed = Marshal.load(Marshal.dump(value))
+    changed["baseline"]["id"] = "f" * 24
+    expect { check(changed) }.to raise_error(DiscussionBridgeGhost::Error)
+    changed = Marshal.load(Marshal.dump(value))
+    changed["baseline"]["tags"] = []
+    expect { check(changed) }.to raise_error(DiscussionBridgeGhost::Error)
+  end
+
   it "does not permit removing the native resource tag or inserting unrelated cards during creation" do
     value = command
     value["candidate"]["tags"] = []

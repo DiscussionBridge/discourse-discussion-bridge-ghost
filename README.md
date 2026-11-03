@@ -24,12 +24,17 @@ physical completion atomically hands the object's temporary exclusion barriers
 to durable physical-native/resource/slug assignments; original
 commands, responses and terminal history remain. A completed draft is not a
 public publication, ownership receipt or receiver acknowledgment. Unknown writes
-without positive completion proof stay blocked. Prepared From writes now require
+without positive completion proof stay blocked. Prepared From publication writes require
 an exact owned-card operation, a fresh command attribute, preserved ownership
 nonce, current native baseline, unrelated editor/metadata preservation and shared
 resource/slug/native-ID collision checks. A draft-to-real-ID transition before
 receiver binding requires a matching retained physical effect, not a copied ID.
 The command attribute does not itself resolve missing-response uncertainty.
+Withdrawal is strictly status-only under the existing native revision/CAS. It
+checks the retained owned rendered/Lexical baseline but cannot replace the
+article, title, authors, tags, date or settings, and does not stamp/rewrite the
+old card. Previously retained physical history remains unchanged; an unsent
+overbroad withdrawal must not be dispatched as a way to alter published content.
 An unidentified create also blocks new writes on its physical Ghost target.
 Only trustworthy, durably reserved native-ID/slug discovery narrows that guard
 to the object; it does not declare ownership or completion. Local exclusion

@@ -43,6 +43,7 @@ RSpec.describe DiscussionBridgeGhost::NativeManagement do
       "status" => stage == "publish" ? "published" : "draft",
       "lexical" => '{"root":{"children":[]}}'
     }
+    fields.delete("lexical") if stage == "withdraw"
     unless stage == "withdraw"
       fields.merge!(
         "title" => "Publication",

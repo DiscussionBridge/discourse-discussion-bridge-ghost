@@ -5,8 +5,10 @@ require_relative "native_document"
 module DiscussionBridgeGhost
   # Validate the prepared native surgery before any write. The original owned
   # nonce/identity and unrelated cards/properties must survive. A fresh command
-  # attribute also makes a real effect participate in Ghost's model collision
-  # check, including otherwise relations-only updates. No-op coordinators must
+  # attribute also makes publication effects participate in Ghost's collision
+  # check, including otherwise relations-only updates. Withdrawal changes only
+  # status under CAS; it does not rewrite a card to stamp a new command.
+  # No-op coordinators must
   # skip dispatch; stamping is not a reason to manufacture an unnecessary write.
   class NativeOwnedCommand
     include ProtectedDiagnostics
@@ -22,6 +24,9 @@ module DiscussionBridgeGhost
     def validate!
       unless @command.dig("owner", "direction") == "from_discourse"
         raise Error.new("work_authority_unavailable")
+      end
+      if @command.dig("owner", "action") == "withdraw"
+        return validate_withdrawal!
       end
       lexical =
         NativeDocument.parse(@fields.fetch("lexical"), maximum_bytes: @maximum)
@@ -121,7 +126,75 @@ module DiscussionBridgeGhost
 
     private
 
+    # Withdrawal is a status-only native change. Do not let an authority which
+    # has no new Source edition replace the article or unrelated metadata. The
+    # original owned card remains exactly as published, including its old mode
+    # and command marker; status participates in Ghost's normal updated_at CAS.
+    def validate_withdrawal!
+      baseline = @command.fetch("baseline")
+      unless @identity["native_id"] && baseline.is_a?(Hash) &&
+               @fields.keys.sort == %w[id status updated_at] &&
+               @fields["status"] == "draft" &&
+               @fields["id"] == @identity.fetch("native_id") &&
+               baseline["id"] == @fields["id"] &&
+               baseline["type"] == @identity.fetch("kind") &&
+               baseline["updated_at"] == @fields["updated_at"]
+        raise Error.new("identity_conflict")
+      end
+      html = baseline.fetch("html")
+      unless html.is_a?(String) && html.bytesize <= @maximum
+        raise Error.new("native_fragment_invalid")
+      end
+      root = Nokogiri::HTML5.fragment(html, **OwnedFragment::OPTIONS)
+      section = root.at_css("section[data-discussionbridge-owned]")
+      raise Error.new("native_fragment_invalid") unless section
+      old_id = section["data-discussionbridge-native-id"]
+      unless ["pending", @identity.fetch("native_id")].include?(old_id)
+        raise Error.new("identity_conflict")
+      end
+      parser = fragment_for(baseline.fetch("html"), native_id: old_id)
+      span = parser.extract(baseline.fetch("html"))
+      lexical =
+        NativeDocument.parse(baseline.fetch("lexical"), maximum_bytes: @maximum)
+      tree = lexical.fetch("root")
+      unless tree.is_a?(Hash) && tree["type"] == "root" &&
+               tree["children"].is_a?(Array)
+        raise Error.new("native_fragment_invalid")
+      end
+      cards = []
+      find_cards(tree) do |node|
+        if node["html"].is_a?(String) &&
+             /discussionbridge-owned:|data-discussionbridge-owned/i.match?(
+               node["html"]
+             )
+          cards << node
+        end
+      end
+      unless cards.length == 1 &&
+               tree["children"].any? { |node| node.equal?(cards.first) } &&
+               parser.extract(cards.first.fetch("html")).sha256 == span.sha256
+        raise Error.new("native_fragment_invalid")
+      end
+      resource = "#discussionbridge-resource-#{@identity.fetch("resource_id")}"
+      tags = baseline.fetch("tags")
+      unless tags.is_a?(Array) && tags.all? { |tag| tag.is_a?(Hash) } &&
+               tags.any? { |tag| tag["name"] == resource }
+        raise Error.new("identity_conflict")
+      end
+      if tags.any? { |tag|
+           tag["name"].is_a?(String) &&
+             tag["name"].start_with?("#discussionbridge-resource-") &&
+             tag["name"] != resource
+         }
+        raise Error.new("identity_conflict")
+      end
+      true
+    end
+
     def fragment_for(html, native_id:)
+      unless html.is_a?(String) && html.bytesize <= @maximum
+        raise Error.new("native_fragment_invalid")
+      end
       root = Nokogiri::HTML5.fragment(html, **OwnedFragment::OPTIONS)
       section = root.at_css("section[data-discussionbridge-owned]")
       raise Error.new("native_fragment_invalid") unless section
