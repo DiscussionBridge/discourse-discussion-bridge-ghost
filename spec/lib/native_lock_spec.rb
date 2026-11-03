@@ -9,23 +9,43 @@ RSpec.describe DiscussionBridgeGhost::NativeLock do
   # real unpinned pool, rather than weakening the lock assertion or mocking SQL.
   self.use_transactional_tests = false
 
+  before do
+    # Native CI's primary pool may have only two slots, one retained by the
+    # harness. Own exactly two additional test sessions without changing that
+    # pool, its fixtures or the database configuration used by Discourse.
+    stub_const("GhostConnectorLockTestRecord", Class.new(ActiveRecord::Base) { self.abstract_class = true })
+    GhostConnectorLockTestRecord.establish_connection(
+      ActiveRecord::Base.connection_db_config.configuration_hash.merge(pool: 2)
+    )
+    @lock_pool = GhostConnectorLockTestRecord.connection_pool
+  end
+
+  after do
+    @lock_pool&.disconnect!
+    GhostConnectorLockTestRecord.remove_connection
+  end
+
+  def synchronize(id, &block)
+    described_class.synchronize(id, pool: @lock_pool, &block)
+  end
+
   it "serializes actual PostgreSQL writers on distinct sessions for one target" do
     id = SecureRandom.uuid
-    described_class.synchronize(id) do |lease|
+    synchronize(id) do |lease|
       result = Thread.new do
-        described_class.synchronize(id) { "unexpected second writer" }
+        synchronize(id) { "unexpected second writer" }
       rescue DiscussionBridgeGhost::Error => error
         error.code
       end.value
       expect(result).to eq("native_lock_busy")
       expect(lease.assert!).to eq(true)
     end
-    expect(described_class.synchronize(id) { "released" }).to eq("released")
+    expect(synchronize(id) { "released" }).to eq("released")
   end
 
   it "detects lock loss even with the query cache enabled" do
     id = SecureRandom.uuid
-    described_class.synchronize(id) do |lease|
+    synchronize(id) do |lease|
       connection = lease.instance_variable_get(:@connection)
       connection.cache do
         expect(lease.assert!).to eq(true)
@@ -46,7 +66,7 @@ RSpec.describe DiscussionBridgeGhost::NativeLock do
       connection_id: "dbc_#{'a' * 24}",
       connection_secret: "SYNTHETIC-unknown-secret-#{'x' * 20}"
     )
-    described_class.synchronize(SecureRandom.uuid) do |lease|
+    synchronize(SecureRandom.uuid) do |lease|
       result = transport.execute(protocol.prepare("V4-01"))
       expect(result.value.fetch("code")).to eq("authentication_failed")
       expect(lease.assert!).to eq(true)
