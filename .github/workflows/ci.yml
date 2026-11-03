@@ -26,5 +26,7 @@ jobs:
         run: ruby test/foundation_test.rb
       - name: Run native HTTP boundary and Ghost API fixture tests
         run: ruby test/ghost_http_test.rb
+      - name: Run ownership receipt fingerprint vectors
+        run: ruby test/ownership_receipt_test.rb
       - name: Verify unfinished package and protocol identities
         run: ruby scripts/check-development.rb
