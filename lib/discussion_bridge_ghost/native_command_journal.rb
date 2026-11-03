@@ -310,6 +310,72 @@ module DiscussionBridgeGhost
       true
     end
 
+    # Before the receiver has a native ID, a local draft/real-ID transition must
+    # descend from a genuinely completed command on this same mapping/resource.
+    # A caller-provided ID, copied marker or successful lookup is not assignment.
+    def assert_local_assignment!(command)
+      @context.outside_transaction!
+      @context.assert!
+      baseline = command.fetch("baseline")
+      raise Error.new("identity_conflict") unless baseline.is_a?(Hash)
+      mapping = command.dig("owner", "mapping_id")
+      matched = false
+      @installation
+        .operational_records
+        .where(kind: "native_command", mapping_public_id: [mapping, nil])
+        .find_each(batch_size: 50) do |row|
+          prior = row.private_payload
+          validate_command!(prior, row.record_key)
+          if row.mapping_public_id &&
+               row.mapping_public_id != prior.dig("owner", "mapping_id")
+            raise Error.new("identity_conflict")
+          end
+          unless prior.dig("owner", "direction") == "from_discourse" &&
+                   prior.dig("owner", "mapping_id") == mapping &&
+                   prior.dig("owner", "external_id") ==
+                     command.dig("owner", "external_id") &&
+                   prior.dig("identity", "resource_id") ==
+                     command.dig("identity", "resource_id") &&
+                   prior.dig("identity", "kind") ==
+                     command.dig("identity", "kind")
+            next
+          end
+          _old, state = load_state(row.record_key)
+          effect = state["completion"]
+          unless effect &&
+                   effect["native_id"] == command.dig("identity", "native_id")
+            next
+          end
+          html = effect.dig("native", "html")
+          next unless html.is_a?(String)
+          root = Nokogiri::HTML5.fragment(html, **OwnedFragment::OPTIONS)
+          section = root.at_css("section[data-discussionbridge-owned]")
+          raise Error.new("native_fragment_invalid") unless section
+          native_id = section["data-discussionbridge-native-id"]
+          unless ["pending", effect.fetch("native_id")].include?(native_id)
+            raise Error.new("identity_conflict")
+          end
+          parser =
+            OwnedFragment.new(
+              resource_id: command.dig("identity", "resource_id"),
+              kind: effect.fetch("kind"),
+              native_id: native_id,
+              nonce: section["data-discussionbridge-fragment-nonce"],
+              maximum_bytes: command.dig("request", "maximum_bytes")
+            )
+          old = parser.extract(html)
+          begin
+            matched ||=
+              parser.extract(baseline.fetch("html")).sha256 == old.sha256
+          rescue Error
+            # A later legitimate effect can have advanced pending -> actual ID or
+            # the command marker. Inspect its retained receipt, not this old one.
+          end
+        end
+      raise Error.new("identity_conflict") unless matched
+      true
+    end
+
     private
 
     def uuid!(value)
@@ -546,6 +612,8 @@ module DiscussionBridgeGhost
       @installation.operational_records.create!(
         kind: kind,
         record_key: key,
+        mapping_public_id:
+          kind == "native_command" ? value.dig("owner", "mapping_id") : nil,
         encrypted_payload:
           @installation.envelope.encrypt(
             "operational_record",

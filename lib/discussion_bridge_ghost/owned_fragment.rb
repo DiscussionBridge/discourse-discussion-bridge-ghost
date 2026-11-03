@@ -87,6 +87,29 @@ module DiscussionBridgeGhost
       html.freeze
     end
 
+    # Correlate one immutable native command inside the existing hashed owned
+    # representation, without rotating its durable ownership nonce. This is
+    # NOT a signature or sufficient proof of an unknown write's completion.
+    def stamp_command(html, command_id:)
+      assert!(
+        command_id.is_a?(String) && SecretEnvelope::UUID.match?(command_id)
+      )
+      original = extract(html)
+      assert!(original.start_byte.zero? && original.end_byte == html.bytesize)
+      root = parse(html, :card)
+      section = root.at_css("section[data-discussionbridge-owned]")
+      assert!(!section.nil?)
+      section["data-discussionbridge-command"] = command_id
+      result = wrap(section.to_html)
+      extract(
+        result,
+        expected: {
+          "data-discussionbridge-command" => command_id
+        }
+      )
+      result
+    end
+
     def extract(html, context: :card, expected: {})
       source = utf8(html)
       assert!(%i[card document].include?(context) && expected.is_a?(Hash))

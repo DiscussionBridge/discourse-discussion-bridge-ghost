@@ -37,6 +37,14 @@ module DiscussionBridgeGhost
       @context.equal?(context)
     end
 
+    def native_presentation_mode
+      @mapping.fetch("presentation_mode")
+    end
+
+    def initial_native_id
+      @initial_native_id
+    end
+
     # Exact ordinary From intent, not a generic callback granting arbitrary
     # native writes. URL moves have additional authority and are refused here.
     def guard_native!(command)

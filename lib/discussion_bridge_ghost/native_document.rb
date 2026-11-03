@@ -54,6 +54,8 @@ module DiscussionBridgeGhost
     ].freeze
     MAXIMUM_BYTES = 33_554_432
 
+    attr_reader :fields
+
     def self.parse(bytes, maximum_bytes:)
       unless bytes.is_a?(String) && bytes.bytesize <= maximum_bytes
         raise Error.new("response_invalid")
@@ -140,6 +142,21 @@ module DiscussionBridgeGhost
         end
       end
       response.each do |key, expected|
+        next if GENERATED.include?(key)
+        same!(key, expected, current)
+      end
+      true
+    end
+
+    def baseline_matches!(current)
+      baseline = @command.fetch("baseline")
+      unless baseline.is_a?(Hash) && current.is_a?(Hash) &&
+               current["id"] == baseline["id"] && current["type"] == @kind &&
+               current["updated_at"] == baseline["updated_at"] &&
+               current["html"] == baseline["html"]
+        raise Error.new("identity_conflict")
+      end
+      baseline.each do |key, expected|
         next if GENERATED.include?(key)
         same!(key, expected, current)
       end

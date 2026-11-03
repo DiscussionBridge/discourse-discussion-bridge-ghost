@@ -2,6 +2,7 @@
 
 require_relative "native_effect_verifier"
 require_relative "native_command_journal"
+require_relative "native_owned_command"
 
 module DiscussionBridgeGhost
   # Unactivated native command executor. The public coordinator will supply
@@ -40,7 +41,11 @@ module DiscussionBridgeGhost
         raise Error.new("native_effect_uncertain")
       end
       raise Error.new("work_authority_unavailable") unless @authority
-      NativeDocument.new(command)
+      document = NativeDocument.new(command)
+      NativeOwnedCommand.new(
+        command: command,
+        expected_mode: @authority.native_presentation_mode
+      ).validate!
       @authority.guard_native!(command)
       http =
         GhostHttp.new(
@@ -50,6 +55,28 @@ module DiscussionBridgeGhost
           api_key: @api_key,
           factory: @factory
         )
+      client = GhostAdminClient.new(http: http)
+      if command.dig("identity", "native_id")
+        unless @authority.initial_native_id
+          @journal.assert_local_assignment!(command)
+        end
+        current =
+          client.get(
+            command.dig("identity", "native_id"),
+            kind: command.dig("identity", "kind"),
+            maximum_bytes: command.dig("request", "maximum_bytes")
+          )
+        document.baseline_matches!(current)
+      elsif !client.find_by_resource(
+            command.dig("identity", "resource_id"),
+            maximum_bytes: command.dig("request", "maximum_bytes")
+          ).empty? ||
+            !client.find_by_slug(
+              command.dig("candidate", "slug"),
+              maximum_bytes: command.dig("request", "maximum_bytes")
+            ).empty?
+        raise Error.new("identity_conflict")
+      end
       attempt = @journal.begin_attempt(command_id, http: http)
       request = command.fetch("request")
       begin

@@ -277,17 +277,41 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     end
   end
 
-  it "executes durable exact draft bytes under actual current V4 authority without acknowledging public publication" do
+  def owned_execution_html(fragment, command_id)
+    attributes =
+      fragment.attributes.merge(
+        "data-discussionbridge-source-revision" => @work.source_revision,
+        "data-discussionbridge-mode" => "simple"
+      )
+    section =
+      "<section #{attributes.map { |key, value| "#{key}=\"#{CGI.escapeHTML(value)}\"" }.join(" ")}><p>Native execution body.</p></section>"
+    fragment.stamp_command(fragment.wrap(section), command_id: command_id)
+  end
+
+  it "executes durable pending-draft and real-ID publish bytes under actual V4 authority without acknowledging receiver work" do
     with_runtime do |context, mutations|
       lease = claim(context, mutations)
       held = authority(context, mutations, lease)
       native_journal =
         DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
       command_id = SecureRandom.uuid
+      fragment =
+        DiscussionBridgeGhost::OwnedFragment.new(
+          resource_id: @record.resource_id,
+          kind: "post",
+          native_id: "pending",
+          nonce: "ab" * 32,
+          maximum_bytes: 262_144
+        )
+      html = owned_execution_html(fragment, command_id)
       fields = {
         "title" => "Native execution fixture",
         "slug" => "article",
         "status" => "draft",
+        "lexical" =>
+          DiscussionBridgeGhost::OwnedLexical.new(fragment: fragment).create(
+            html
+          ),
         "tags" => [
           { "name" => "#discussionbridge-resource-#{@record.resource_id}" }
         ]
@@ -325,39 +349,61 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         fields.merge(
           "id" => "a" * 24,
           "type" => "post",
-          "updated_at" => "2026-11-03T16:00:00.000Z"
+          "updated_at" => "2026-11-03T16:00:00.000Z",
+          "html" => html
         )
       origin = @target.admin_origin
+      created = false
       post =
-        stub_request(:post, origin + "/ghost/api/admin/posts/").with(
-          body: exact
-        ).to_return(
-          status: 201,
+        stub_request(:post, origin + "/ghost/api/admin/posts/")
+          .with(body: exact)
+          .to_return do
+            created = true
+            {
+              status: 201,
+              headers: {
+                "Content-Type" => "application/json"
+              },
+              body: JSON.generate("posts" => [native])
+            }
+          end
+      stub_request(
+        :get,
+        %r{#{Regexp.escape(origin)}/ghost/api/admin/posts/#{native.fetch("id")}/}
+      ).to_return do
+        {
+          status: 200,
           headers: {
             "Content-Type" => "application/json"
           },
           body: JSON.generate("posts" => [native])
-        )
-      stub_request(
-        :get,
-        %r{#{Regexp.escape(origin)}/ghost/api/admin/posts/#{native.fetch("id")}/}
-      ).to_return(
-        status: 200,
-        headers: {
-          "Content-Type" => "application/json"
-        },
-        body: JSON.generate("posts" => [native])
-      )
+        }
+      end
       %w[post page].each do |kind|
         stub_request(
           :get,
           %r{#{Regexp.escape(origin)}/ghost/api/admin/#{kind}s/\?filter=}
+        ).to_return do
+          {
+            status: 200,
+            headers: {
+              "Content-Type" => "application/json"
+            },
+            body:
+              JSON.generate(
+                "#{kind}s" => (kind == "post" && created ? [native] : [])
+              )
+          }
+        end
+        stub_request(
+          :get,
+          %r{#{Regexp.escape(origin)}/ghost/api/admin/#{kind}s/\?filter=slug}
         ).to_return(
           status: 200,
           headers: {
             "Content-Type" => "application/json"
           },
-          body: JSON.generate("#{kind}s" => (kind == "post" ? [native] : []))
+          body: JSON.generate("#{kind}s" => [])
         )
       end
       executor =
@@ -370,6 +416,78 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       completion = executor.execute(command_id)
       expect(completion.dig("native", "status")).to eq("draft")
       expect(executor.execute(command_id)).to eq(completion)
+      original = native_journal.retained(command_id).fetch("command")
+      publish_id = SecureRandom.uuid
+      real_fragment =
+        DiscussionBridgeGhost::OwnedFragment.new(
+          resource_id: @record.resource_id,
+          kind: "post",
+          native_id: native.fetch("id"),
+          nonce: fragment.nonce,
+          maximum_bytes: 262_144
+        )
+      published_html = owned_execution_html(real_fragment, publish_id)
+      published_lexical =
+        DiscussionBridgeGhost::OwnedLexical.new(
+          fragment: real_fragment
+        ).replace(
+          current: native,
+          html: published_html,
+          expected_revision: native.fetch("updated_at"),
+          baseline_sha256: fragment.extract(html).sha256,
+          prior_fragment: fragment
+        )
+      update_fields = {
+        "id" => native.fetch("id"),
+        "updated_at" => native.fetch("updated_at"),
+        "slug" => "article",
+        "status" => "published",
+        "lexical" => published_lexical
+      }
+      native_journal.prepare(
+        command_id: publish_id,
+        identity:
+          original.fetch("identity").merge("native_id" => native.fetch("id")),
+        owner: original.fetch("owner").merge("action" => "publish"),
+        request: {
+          "method" => "PUT",
+          "path" => "/ghost/api/admin/posts/#{native.fetch("id")}/",
+          "body_bytes" => JSON.generate("posts" => [update_fields]),
+          "maximum_bytes" => 262_144,
+          "allowed_statuses" => [200]
+        },
+        baseline: native,
+        candidate: update_fields
+      )
+      update =
+        stub_request(
+          :put,
+          origin + "/ghost/api/admin/posts/#{native.fetch("id")}/"
+        ).to_return do
+          native =
+            native.merge(update_fields).merge(
+              "updated_at" => "2026-11-03T16:00:01.000Z",
+              "html" => published_html
+            )
+          {
+            status: 200,
+            headers: {
+              "Content-Type" => "application/json"
+            },
+            body: JSON.generate("posts" => [native])
+          }
+        end
+      expect(executor.execute(publish_id).dig("native", "status")).to eq(
+        "published"
+      )
+      expect(
+        native_journal.retained(command_id).dig(
+          "command",
+          "identity",
+          "native_id"
+        )
+      ).to eq(nil)
+      expect(update).to have_been_requested.once
       expect(post).to have_been_requested.once
       expect(@work.reload.state).to eq("leased")
       expect(@mapping.reload.destination_native_id).to eq(nil)
