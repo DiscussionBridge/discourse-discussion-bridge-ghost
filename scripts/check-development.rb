@@ -13,6 +13,7 @@ unless manifest.dig("component", "version") == "0.4.0-alpha.1"
 end
 abort "Wrong protocol" unless manifest["wire_version"] == "v4"
 abort "Unexpected release" unless manifest["release_version"].nil?
+abort "Wrong connector license" unless manifest["license"] == "GPL-2.0-or-later"
 unless manifest["status"] == "unfinished_implementation_candidate_not_qualified"
   abort "Unexpected acceptance claim"
 end
@@ -30,8 +31,11 @@ if File
      .nil?
   abort "Missing native plugin"
 end
+unless File.read(File.join(root, "LICENSE")).include?("GPL-2.0-or-later")
+  abort "Missing connector GPL license"
+end
 if File
-     .read(File.join(root, "LICENSE"))
+     .read(File.join(root, "LICENSES", "MIT-Ghost.txt"))
      .index("Copyright (c) 2026 WebSynergetics")
      .nil?
   abort "Missing preserved license"

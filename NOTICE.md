@@ -1,7 +1,12 @@
 # Source license notices
 
-This unfinished development repository contains files with different licenses.
-The root MIT notice does not replace a file's explicit upstream license.
+This connector is GPL-2.0-or-later, as approved by Phil on November 3, 2026.
+Its distribution includes the retained notices on reused material below. The
+connector's GPL license does not remove those upstream notices.
+
+Ghost adapter material adapted from the existing MIT-licensed
+`DiscussionBridge/ghost-discussion-bridge` source retains its MIT notice in
+`LICENSES/MIT-Ghost.txt`. This includes the inherited WebSynergetics copyright.
 
 `lib/discussion_bridge_ghost/wire_json.rb` includes exact-number handling adapted
 from `DiscussionBridge/discourse-discussion-bridge`, commit
@@ -10,6 +15,5 @@ from `DiscussionBridge/discourse-discussion-bridge`, commit
 receiver's license notice is preserved in `COPYING`. The adapted file is
 marked accordingly. Do not treat it as MIT-only code.
 
-The connector's overall distribution-license decision is being confirmed with
-Phil. Existing Ghost and receiver repositories' licenses are unchanged. No
+Existing Ghost and receiver repositories' licenses are unchanged. No
 release or qualified installation package is published.

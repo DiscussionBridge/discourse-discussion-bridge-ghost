@@ -284,17 +284,17 @@ module DiscussionBridgeGhost
     end
 
     def validate_identity!(identity)
-      unless identity.is_a?(Hash) && identity.keys.sort == IDENTITY_FIELDS &&
-               %w[post page].include?(identity["kind"]) &&
-               (
-                 identity["native_id"].nil? ||
-                   (
-                     identity["native_id"].is_a?(String) &&
-                       /\A[a-f0-9]{24}\z/.match?(identity["native_id"])
-                   )
-               )
-        raise Error.new("identity_conflict")
-      end
+      valid_identity =
+        identity.is_a?(Hash) && identity.keys.sort == IDENTITY_FIELDS &&
+          %w[post page].include?(identity["kind"]) &&
+          (
+            identity["native_id"].nil? ||
+              (
+                identity["native_id"].is_a?(String) &&
+                  /\A[a-f0-9]{24}\z/.match?(identity["native_id"])
+              )
+          )
+      raise Error.new("identity_conflict") unless valid_identity
       uuid!(identity["resource_id"])
     end
 
@@ -429,9 +429,9 @@ module DiscussionBridgeGhost
       validate_identity!(command.fetch("identity"))
       baseline = command.fetch("baseline")
       candidate = command.fetch("candidate")
-      unless candidate.is_a?(Hash) && (baseline.nil? || baseline.is_a?(Hash))
-        raise Error.new("identity_conflict")
-      end
+      valid_context =
+        candidate.is_a?(Hash) && (baseline.nil? || baseline.is_a?(Hash))
+      raise Error.new("identity_conflict") unless valid_context
       slugs = [baseline && baseline["slug"], candidate["slug"]].compact.uniq
       identity_claims(command.fetch("identity"), slugs)
     end
@@ -589,19 +589,19 @@ module DiscussionBridgeGhost
         else
           if dispatch["phase"] == "response_received"
             response = value["response"]
-            unless response.is_a?(Hash) &&
-                     response.keys.sort == %w[body_base64 headers status] &&
-                     response["status"].is_a?(Integer) &&
-                     command.dig("request", "allowed_statuses").include?(
-                       response["status"]
-                     ) && response["headers"].is_a?(Hash) &&
-                     response["headers"].keys.sort ==
-                       %w[content-encoding content-type location retry-after] &&
-                     response["headers"].values.all? { |header|
-                       header.nil? || header.is_a?(String)
-                     } && response["body_base64"].is_a?(String)
-              raise Error.new("identity_conflict")
-            end
+            valid_response =
+              response.is_a?(Hash) &&
+                response.keys.sort == %w[body_base64 headers status] &&
+                response["status"].is_a?(Integer) &&
+                command.dig("request", "allowed_statuses").include?(
+                  response["status"]
+                ) && response["headers"].is_a?(Hash) &&
+                response["headers"].keys.sort ==
+                  %w[content-encoding content-type location retry-after] &&
+                response["headers"].values.all? do |header|
+                  header.nil? || header.is_a?(String)
+                end && response["body_base64"].is_a?(String)
+            raise Error.new("identity_conflict") unless valid_response
             bytes = Base64.strict_decode64(response.fetch("body_base64"))
             if bytes.bytesize > command.dig("request", "maximum_bytes")
               raise Error.new("identity_conflict")

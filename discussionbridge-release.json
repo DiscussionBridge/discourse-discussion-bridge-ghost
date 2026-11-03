@@ -4,6 +4,7 @@
   "wire_version": "v4",
   "candidate_id": "discussionbridge-v4-ghost-native-20261102",
   "release_version": null,
+  "license": "GPL-2.0-or-later",
   "status": "unfinished_implementation_candidate_not_qualified",
   "normative_sha256": "808042688cbde88fac0acdf1187e4cb8c251e13025bfcf09cf3a3c361ca02003",
   "schema_sha256": "e6a15a6d70f7bc8b8ee82aa22a0b9c2ff1bbf2da6277f7087118be9e026ce5c0"
