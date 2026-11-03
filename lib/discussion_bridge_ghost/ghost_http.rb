@@ -108,9 +108,9 @@ module DiscussionBridgeGhost
         http = @factory.call(@address.hostname, @address.port)
         http.use_ssl = true
         http.verify_mode = OpenSSL::SSL::VERIFY_PEER
-        http.open_timeout = 3
-        http.read_timeout = 3
-        http.write_timeout = 3
+        http.open_timeout = @deadline_seconds
+        http.read_timeout = @deadline_seconds
+        http.write_timeout = @deadline_seconds
         http.max_retries = 0
         headers = {
           "Accept" => {
