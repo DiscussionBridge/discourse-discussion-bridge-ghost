@@ -19,8 +19,8 @@ License: GPL-2.0-or-later; retained reused-material notices are in `NOTICE.md`.
 The native-command components remain unactivated: no controller or job calls
 them. The development executor sends already-retained ordinary From Discourse
 commands under current receiver authority. It can recover a retained successful
-response through complete native readback without repeating a write. Only that
-checked physical completion releases its temporary exclusion barriers; original
+response through complete native readback without repeating a write. Checked
+physical completion releases the object's temporary exclusion barriers; original
 commands, responses and terminal history remain. A completed draft is not a
 public publication, ownership receipt or receiver acknowledgment. Unknown writes
 without positive completion proof stay blocked. Prepared From writes now require
@@ -29,6 +29,13 @@ nonce, current native baseline, unrelated editor/metadata preservation and share
 resource/slug/native-ID collision checks. A draft-to-real-ID transition before
 receiver binding requires a matching retained physical effect, not a copied ID.
 The command attribute does not itself resolve missing-response uncertainty.
+An unidentified create also blocks new writes on its physical Ghost target.
+Only trustworthy, durably reserved native-ID/slug discovery narrows that guard
+to the object; it does not declare ownership or completion. Local exclusion
+qualification preserves older original commands/events/receipts, including
+disabled installations, without using foreign connection credentials or issuing
+native/receiver requests. It is bounded and indexed, not a scan of all completed
+history on every ordinary write.
 URL-move authority, complete source rendering/metadata preparation, no-response
 recovery, current/public verification,
 coordinators, jobs and administration are still being implemented. Installing
