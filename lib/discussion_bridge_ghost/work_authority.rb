@@ -3,6 +3,7 @@
 require "json"
 require "securerandom"
 require "time"
+require_relative "native_management"
 
 module DiscussionBridgeGhost
   # From-Discourse work only. A successful guard is short-lived authority, NOT
@@ -81,7 +82,19 @@ module DiscussionBridgeGhost
       end
       # The initial native binding is nil throughout the draft/real-ID phase.
       # A locally discovered draft ID must not impersonate a receiver binding.
-      guard!(operation: :mutate, native_id: @initial_native_id)
+      management = command.dig("candidate", "management")
+      if management
+        management =
+          NativeManagement.new(protocol: @protocol, value: management)
+        management.validate_command!(command)
+      end
+      # Descriptor-free development history remains physical evidence only;
+      # the forthcoming ownership ledger must not promote it to managed proof.
+      guard!(
+        operation: :mutate,
+        native_id: @initial_native_id,
+        management: management
+      )
     rescue KeyError, TypeError
       raise Error.new("identity_conflict"), cause: nil
     end
@@ -140,9 +153,12 @@ module DiscussionBridgeGhost
     # :mutate is only the leased stage. :verify is only the synchronized stage
     # and needs the exact native ID from a retained native receipt. Neither
     # terminal history nor a synchronized lease permits another native create.
-    def guard!(operation:, native_id: nil)
+    def guard!(operation:, native_id: nil, management: nil)
       if %i[mutate verify].exclude?(operation)
         raise Error.new("work_authority_unavailable")
+      end
+      unless management.nil? || management.is_a?(NativeManagement)
+        raise Error.new("identity_conflict")
       end
       if native_id &&
            (!native_id.is_a?(String) || !/\A[a-f0-9]{24}\z/.match?(native_id))
@@ -150,7 +166,7 @@ module DiscussionBridgeGhost
       end
       @context.outside_transaction!
       @context.assert!
-      current!(operation, native_id)
+      current!(operation, native_id, management: management)
       assert_fence!
 
       # Resolve the old request first, including the after-response/before-local-
@@ -159,7 +175,7 @@ module DiscussionBridgeGhost
       resolve_pending! if checkpoint.fetch("pending")
       begin_renewal!
       renewed = resolve_pending!
-      current = current!(operation, native_id)
+      current = current!(operation, native_id, management: management)
       assert_fence!
       @context.assert!
       if Time.iso8601(renewed.fetch("expires_at")) - @now.call <
@@ -179,7 +195,7 @@ module DiscussionBridgeGhost
       JSON.parse(JSON.generate(value))
     end
 
-    def current!(operation, native_id)
+    def current!(operation, native_id, management: nil)
       connection = read!("V4-01")
       policy = connection.fetch("policy")
       capabilities = connection.fetch("native_capabilities")
@@ -203,6 +219,7 @@ module DiscussionBridgeGhost
                  @mapping.fetch("presentation_mode")
         raise Error.new("work_authority_unavailable")
       end
+      management&.assert_policy!(policy)
       current =
         read!("V4-14", path: { "work_id" => @identity.fetch("work_id") })
       work = current.fetch("work")

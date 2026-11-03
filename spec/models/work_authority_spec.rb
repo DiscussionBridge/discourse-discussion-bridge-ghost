@@ -819,6 +819,43 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     end
   end
 
+  it "checks private stage-management intent against actual current policy without changing the retained command or sending it as native data" do
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      native_journal =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      args, = native_arguments(context, lease, native_id: nil, create: true)
+      fields = args.fetch(:candidate).merge("visibility" => "public")
+      management =
+        DiscussionBridgeGhost::NativeManagement.for_policy(
+          protocol: context.protocol,
+          policy: @connection.reload.cms_configuration.fetch("policy"),
+          stage: "create_draft"
+        )
+      args[:candidate] = fields.merge("management" => management.value)
+      args[:request]["body_bytes"] = JSON.generate("posts" => [fields])
+      command = native_journal.prepare(**args)
+      before = native_journal.retained(args.fetch(:command_id))
+      held.guard_native!(command)
+      expect(native_journal.retained(args.fetch(:command_id))).to eq(before)
+      expect(
+        JSON.parse(command.dig("request", "body_bytes")).fetch("posts").first
+      ).not_to have_key("management")
+      altered = JSON.parse(JSON.generate(command))
+      altered.fetch("candidate").fetch("management")[
+        "policy_revision"
+      ] = SecureRandom.uuid
+      expect { held.guard_native!(altered) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      ) { |error| expect(error.code).to eq("work_authority_unavailable") }
+      expect(native_journal.retained(args.fetch(:command_id))).to eq(before)
+      expect(@mapping.reload.destination_native_id).to eq(nil)
+      expect(@work.reload.state).to eq("leased")
+    end
+    expect(a_request(:any, /ghost-authority-/)).not_to have_been_made
+  end
+
   it "does not let a current From lease authorize another generation, resource, To move or From move" do
     with_runtime do |context, mutations|
       lease = claim(context, mutations)

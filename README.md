@@ -63,6 +63,16 @@ source dates and selects the required comments host. It refuses an oversized
 complete card rather than silently publishing an excerpt. It neither invents a
 browser asset URL nor authorizes a write; actual loader/assets and current
 ownership-baseline qualification remain separate unfinished work.
+New From commands may retain private versioned management intent in their
+immutable candidate, never in the Ghost request or receiver wire payload. It
+binds the original policy and actual draft/publish/withdraw stage: a draft or
+withdrawal does not pretend that selected publication authors/taxonomy were
+applied. Publishing preserves native authors/tags for empty selections; explicit
+ordered author/taxonomy selections keep their existing whole-relation semantics.
+Current WorkAuthority checks a supplied descriptor against actual current policy
+both before and after renewal. Original descriptor-free development history is
+not rewritten or promoted to managed-baseline proof. The private descriptor is
+intent, not native completion, ownership, catalog availability or an ACK.
 URL-move authority, complete source rendering/metadata preparation, no-response
 recovery, current/public verification,
 coordinators, jobs and administration are still being implemented. Installing
