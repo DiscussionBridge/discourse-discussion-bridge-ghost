@@ -69,6 +69,121 @@ RSpec.describe DiscussionBridgeGhost::GhostHttp do
     expect(request).to have_been_requested.once
   end
 
+  def dispatch_identity
+    {
+      "command_id" => SecureRandom.uuid,
+      "attempt_id" => SecureRandom.uuid,
+      "execution_id" => SecureRandom.uuid
+    }
+  end
+
+  it "binds genuine completed native dispatch to the exact private attempt without asserting ownership" do
+    identity = dispatch_identity
+    body = '{"posts":[{"status":"draft"}]}'
+    request =
+      stub_request(
+        :post,
+        "https://ghost-native.example/ghost/api/admin/posts/"
+      ).with(body: body).to_return(
+        status: 201,
+        headers: {
+          "Content-Type" => "application/json"
+        },
+        body: '{"posts":[]}'
+      )
+    http = transport
+    response =
+      http.request(
+        "POST",
+        "/ghost/api/admin/posts/",
+        maximum_bytes: 100,
+        allowed_statuses: [201],
+        authenticated: true,
+        retained_body: body,
+        dispatch: identity
+      )
+    evidence = http.actual_dispatch_evidence(response, dispatch: identity)
+    expect(evidence.value.fetch("phase")).to eq("response_received")
+    expect(evidence.value.fetch("body_sha256")).to eq(
+      Digest::SHA256.hexdigest(body)
+    )
+    expect(evidence.response).to equal(response)
+    expect(evidence.value).not_to have_key("ownership")
+    expect(
+      http.actual_dispatch_evidence(
+        response,
+        dispatch: identity.merge("attempt_id" => SecureRandom.uuid)
+      )
+    ).to eq(nil)
+    expect(
+      transport.actual_dispatch_evidence(response, dispatch: identity)
+    ).to eq(nil)
+    expect(request).to have_been_requested.once
+  end
+
+  it "does not classify a native request timeout as no-send after entering request" do
+    identity = dispatch_identity
+    request =
+      stub_request(
+        :put,
+        "https://ghost-native.example/ghost/api/admin/posts/#{"a" * 24}/"
+      ).to_timeout
+    http = transport
+    error = nil
+    expect {
+      http.request(
+        "PUT",
+        "/ghost/api/admin/posts/#{"a" * 24}/",
+        maximum_bytes: 100,
+        authenticated: true,
+        retained_body: '{"posts":[]}',
+        dispatch: identity
+      )
+    }.to raise_error(described_class::Failure) { |failure| error = failure }
+    expect(
+      http
+        .actual_dispatch_evidence(error, dispatch: identity)
+        .value
+        .fetch("phase")
+    ).to eq("may_have_sent")
+    expect(request).to have_been_requested.once
+    expect(error.cause).to eq(nil)
+  end
+
+  it "retains a genuine no-send fact when the pre-request guard stops dispatch" do
+    identity = dispatch_identity
+    request =
+      stub_request(:post, "https://ghost-native.example/ghost/api/admin/posts/")
+    http =
+      transport(
+        guard: -> { raise DiscussionBridgeGhost::Error.new("disabled") }
+      )
+    error = nil
+    expect {
+      http.request(
+        "POST",
+        "/ghost/api/admin/posts/",
+        maximum_bytes: 100,
+        authenticated: true,
+        retained_body: '{"posts":[]}',
+        dispatch: identity
+      )
+    }.to raise_error(DiscussionBridgeGhost::Error) { |failure| error = failure }
+    expect(
+      http
+        .actual_dispatch_evidence(error, dispatch: identity)
+        .value
+        .fetch("phase")
+    ).to eq("not_sent")
+    expect(
+      http.actual_dispatch_evidence(
+        DiscussionBridgeGhost::Error.new("disabled"),
+        dispatch: identity
+      )
+    ).to eq(nil)
+    expect(request).not_to have_been_requested
+  end
+
   it "does not make a native request after current authority is withdrawn" do
     request =
       stub_request(

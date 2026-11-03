@@ -114,6 +114,210 @@ class GhostNativeHttpTest < Minitest::Test
     refute_includes http.inspect, KEY
   end
 
+  def dispatch_identity
+    {
+      "command_id" => RESOURCE,
+      "attempt_id" => "20a59dad-638b-4290-a937-1a5fba7efeb1",
+      "execution_id" => "73aa9272-2015-4a17-a5d2-b519dc287872"
+    }
+  end
+
+  def dispatch_write(
+    http,
+    dispatch = dispatch_identity,
+    body = '{"posts":[{"status":"draft"}]}'
+  )
+    http.request(
+      "POST",
+      "/ghost/api/admin/posts/",
+      maximum_bytes: 1000,
+      authenticated: true,
+      allowed_statuses: [201],
+      retained_body: body,
+      dispatch: dispatch
+    )
+  end
+
+  def test_denied_guard_has_genuine_no_send_provenance_but_no_native_success_claim
+    http =
+      transport(
+        Incoming.new(201),
+        guard: -> { raise DiscussionBridgeGhost::Error.new("disabled") }
+      )
+    error = assert_raises(DiscussionBridgeGhost::Error) { dispatch_write(http) }
+    evidence = http.actual_dispatch_evidence(error, dispatch: dispatch_identity)
+    assert_equal "not_sent", evidence.value.fetch("phase")
+    assert_equal "POST", evidence.value.fetch("method")
+    assert_equal "/ghost/api/admin/posts/", evidence.value.fetch("path")
+    assert_nil evidence.response
+    assert_empty @connection.requests
+    refute evidence.value.key?("applied")
+    refute evidence.value.key?("native_id")
+  end
+
+  def test_setup_failure_before_request_is_no_send_but_entered_request_failure_is_uncertain
+    http = transport(Incoming.new(201))
+    @connection.define_singleton_method(:start) do
+      raise "SYNTHETIC-private-setup-failure"
+    end
+    error =
+      assert_raises(DiscussionBridgeGhost::GhostHttp::Failure) do
+        dispatch_write(http)
+      end
+    assert_equal "not_sent",
+                 http
+                   .actual_dispatch_evidence(error, dispatch: dispatch_identity)
+                   .value
+                   .fetch("phase")
+    assert_empty @connection.requests
+    http = transport(:failure)
+    error =
+      assert_raises(DiscussionBridgeGhost::GhostHttp::Failure) do
+        dispatch_write(http)
+      end
+    assert_equal "may_have_sent",
+                 http
+                   .actual_dispatch_evidence(error, dispatch: dispatch_identity)
+                   .value
+                   .fetch("phase")
+    assert_equal 1, @connection.requests.length
+    assert_nil error.cause
+  end
+
+  def test_dispatch_proof_cannot_be_forged_transferred_or_rebound_to_another_attempt
+    http =
+      transport(
+        Incoming.new(201),
+        guard: -> { raise DiscussionBridgeGhost::Error.new("disabled") }
+      )
+    error = assert_raises(DiscussionBridgeGhost::Error) { dispatch_write(http) }
+    assert_nil http.actual_dispatch_evidence(
+                 DiscussionBridgeGhost::Error.new("disabled"),
+                 dispatch: dispatch_identity
+               )
+    assert_nil http.actual_dispatch_evidence(
+                 error.dup,
+                 dispatch: dispatch_identity
+               )
+    %w[command_id attempt_id execution_id].each do |field|
+      other =
+        dispatch_identity.merge(field => "af4e91f3-6331-4adf-8da1-5ecde1d56aff")
+      assert_nil http.actual_dispatch_evidence(error, dispatch: other)
+    end
+    unrelated = transport(Incoming.new(201))
+    assert_nil unrelated.actual_dispatch_evidence(
+                 error,
+                 dispatch: dispatch_identity
+               )
+    fabricated =
+      DiscussionBridgeGhost::GhostHttp::DispatchEvidence.new(
+        value: {
+        },
+        response: nil
+      )
+    assert_nil http.actual_dispatch_evidence(
+                 fabricated,
+                 dispatch: dispatch_identity
+               )
+  end
+
+  def test_payload_and_attempt_identity_are_snapshotted_before_mutable_guard_callbacks
+    body = '{"posts":[{"status":"draft"}]}'.dup
+    expected_body = body.dup
+    identity = dispatch_identity
+    expected_identity = identity.dup
+    http =
+      transport(
+        Incoming.new(201),
+        guard: -> do
+          body.replace("SYNTHETIC-mutated-after-preparation")
+          identity["attempt_id"] = "af4e91f3-6331-4adf-8da1-5ecde1d56aff"
+        end
+      )
+    result = dispatch_write(http, identity, body)
+    evidence =
+      http.actual_dispatch_evidence(result, dispatch: expected_identity)
+    assert_equal expected_body, @connection.requests.first.body
+    assert_equal Digest::SHA256.hexdigest(expected_body),
+                 evidence.value.fetch("body_sha256")
+    assert_equal "response_received", evidence.value.fetch("phase")
+    assert_nil http.actual_dispatch_evidence(result, dispatch: identity)
+    assert_raises(FrozenError) do
+      evidence.value.fetch("dispatch")["attempt_id"] = "changed"
+    end
+  end
+
+  def test_completed_response_is_retained_even_when_the_post_call_guard_revokes_authority
+    guards = 0
+    http =
+      transport(
+        Incoming.new(201, "SYNTHETIC-private-native-response"),
+        guard: -> do
+          guards += 1
+          raise DiscussionBridgeGhost::Error.new("disabled") if guards == 2
+        end
+      )
+    error = assert_raises(DiscussionBridgeGhost::Error) { dispatch_write(http) }
+    evidence = http.actual_dispatch_evidence(error, dispatch: dispatch_identity)
+    assert_equal "response_received", evidence.value.fetch("phase")
+    assert_equal "SYNTHETIC-private-native-response", evidence.response.bytes
+    refute_includes evidence.inspect, "private-native-response"
+    refute_includes JSON.generate(evidence.value), KEY
+    assert @connection.closed
+  end
+
+  def test_429_and_invalid_reply_after_request_entry_are_not_no_send
+    [
+      Incoming.new(429, "", "retry-after" => "15"),
+      Incoming.new(201, "{}", "content-length" => "9001")
+    ].each do |incoming|
+      http = transport(incoming)
+      error =
+        assert_raises(DiscussionBridgeGhost::GhostHttp::Failure) do
+          dispatch_write(http)
+        end
+      evidence =
+        http.actual_dispatch_evidence(error, dispatch: dispatch_identity)
+      assert_equal "may_have_sent", evidence.value.fetch("phase")
+      assert_nil evidence.response
+      assert_equal 1, @connection.requests.length
+    end
+  end
+
+  def test_dispatch_metadata_is_exact_nullable_and_cannot_claim_provenance_for_generic_payloads
+    [
+      false,
+      {},
+      dispatch_identity.merge("unknown" => "extra"),
+      dispatch_identity.merge("command_id" => "invalid")
+    ].each do |invalid|
+      http = transport(Incoming.new(201))
+      assert_raises(DiscussionBridgeGhost::Error) do
+        dispatch_write(http, invalid)
+      end
+      assert_empty @connection.requests
+    end
+    http = transport(Incoming.new(201))
+    assert_raises(DiscussionBridgeGhost::Error) do
+      http.request(
+        "POST",
+        "/ghost/api/admin/posts/",
+        maximum_bytes: 100,
+        authenticated: true,
+        payload: {
+          "posts" => []
+        },
+        dispatch: dispatch_identity
+      )
+    end
+    assert_empty @connection.requests
+    result = dispatch_write(http, nil)
+    assert_nil http.actual_dispatch_evidence(
+                 result,
+                 dispatch: dispatch_identity
+               )
+  end
+
   def test_public_verification_never_sends_private_credentials
     http =
       transport(

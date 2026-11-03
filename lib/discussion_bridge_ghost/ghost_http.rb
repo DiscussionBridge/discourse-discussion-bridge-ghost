@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "digest"
 require "net/http"
 require "openssl"
 require "timeout"
@@ -15,6 +16,14 @@ module DiscussionBridgeGhost
 
     Response =
       Struct.new(:status, :headers, :bytes, keyword_init: true) do
+        include ProtectedDiagnostics
+      end
+
+    # Private process-local dispatch facts only, not native ownership, current
+    # authority, successful application or remote quiescence. A manufactured
+    # object is not returned by actual_dispatch_evidence.
+    DispatchEvidence =
+      Struct.new(:value, :response, keyword_init: true) do
         include ProtectedDiagnostics
       end
 
@@ -45,6 +54,7 @@ module DiscussionBridgeGhost
       raise Error.new("configuration_invalid") unless valid_deadline
       @deadline_seconds = deadline_seconds
       @origin = protocol.origin_key(origin).freeze
+      @protocol = protocol
       @address = URI.parse(@origin)
       @guard, @now = guard, now
       @api_key = api_key&.dup&.freeze
@@ -52,6 +62,16 @@ module DiscussionBridgeGhost
       @factory =
         factory ||
           ->(host, port) { ::FinalDestination::HTTP.new(host, port, nil) }
+      @dispatch_evidence = ObjectSpace::WeakMap.new
+    end
+
+    def bound_origin?(protocol:, origin:)
+      @protocol.equal?(protocol) && @origin == protocol.origin_key(origin)
+    end
+
+    def actual_dispatch_evidence(outcome, dispatch:)
+      evidence = @dispatch_evidence[outcome]
+      evidence if evidence && evidence.value.fetch("dispatch") == dispatch
     end
 
     def request(
@@ -62,8 +82,12 @@ module DiscussionBridgeGhost
       authenticated: false,
       media: "json",
       allowed_statuses: [200],
-      retained_body: nil
+      retained_body: nil,
+      dispatch: nil
     )
+      descriptor = nil
+      may_have_sent = false
+      response = nil
       unless %w[GET POST PUT].include?(method) && path.is_a?(String) &&
                path.ascii_only? && path.start_with?("/") &&
                !path.start_with?("//") &&
@@ -102,8 +126,24 @@ module DiscussionBridgeGhost
            .any? { |segment| %w[. ..].include?(segment.gsub(/%2e/i, ".")) }
         raise Error.new("configuration_invalid")
       end
+      unless dispatch.nil?
+        # Exact native command bytes are already retained. Snapshot them before
+        # any guard callback; a mutated caller string cannot change the request
+        # after its provenance was bound. Preparation is separately bounded and
+        # precedes the fresh effect-authority check/network deadline.
+        Timeout.timeout(@deadline_seconds, Timeout::Error) do
+          descriptor, retained_body =
+            prepare_dispatch(
+              dispatch,
+              method,
+              path,
+              retained_body,
+              authenticated: authenticated
+            )
+          method = descriptor.fetch("method")
+        end
+      end
       @guard.call
-      response = nil
       # The default Timeout internal exception bypasses Net::HTTP's
       # StandardError cleanup while TLS still owns a local, not-yet-installed
       # socket. An explicit exception traverses that cleanup; max_retries stays
@@ -141,6 +181,9 @@ module DiscussionBridgeGhost
         outgoing = klass.new(uri.request_uri, headers)
         outgoing.body = body if body
         http.start do |connection|
+          # Conservative boundary: entering this call MAY send bytes, even if
+          # the call fails before receiving headers. Never infer no-send later.
+          may_have_sent = true
           connection.request(outgoing) do |incoming|
             status = Integer(incoming.code, 10)
             if status == 429
@@ -201,14 +244,59 @@ module DiscussionBridgeGhost
         end
         @guard.call
       end
-      response || raise(Failure.new)
-    rescue Error
+      result = response || raise(Failure.new)
+      remember_dispatch(result, descriptor, may_have_sent, response)
+      result
+    rescue Error => error
+      remember_dispatch(error, descriptor, may_have_sent, response)
       raise
     rescue StandardError
       # A failed POST/PUT may already have reached Ghost. The native coordinator
       # must retain its prior intent and look up ownership; never create again
       # merely because a reply or this transport's deadline was lost.
-      raise Failure.new, cause: nil
+      error = Failure.new
+      remember_dispatch(error, descriptor, may_have_sent, response)
+      raise error, cause: nil
+    end
+
+    private
+
+    def prepare_dispatch(dispatch, method, path, body, authenticated:)
+      unless dispatch.is_a?(Hash) &&
+               dispatch.keys.sort == %w[attempt_id command_id execution_id] &&
+               dispatch.values.all? { |id|
+                 id.is_a?(String) && SecretEnvelope::UUID.match?(id)
+               } && authenticated && %w[POST PUT].include?(method) &&
+               body.is_a?(String)
+        raise Error.new("configuration_invalid")
+      end
+      snapshot = body.dup.force_encoding(Encoding::UTF_8).freeze
+      identity = dispatch.transform_values { |id| id.dup.freeze }.freeze
+      descriptor = {
+        "format" => "ghost-http-dispatch-1",
+        "dispatch" => identity,
+        "origin" => @origin,
+        "method" => method.dup.freeze,
+        "path" => path.dup.freeze,
+        "body_sha256" => Digest::SHA256.hexdigest(snapshot).freeze
+      }.freeze
+      [descriptor, snapshot]
+    end
+
+    def remember_dispatch(outcome, descriptor, may_have_sent, response)
+      return unless descriptor
+      phase =
+        if response
+          "response_received"
+        elsif may_have_sent
+          "may_have_sent"
+        else
+          "not_sent"
+        end
+      @dispatch_evidence[outcome] = DispatchEvidence.new(
+        value: descriptor.merge("phase" => phase.freeze).freeze,
+        response: response
+      ).freeze
     end
   end
 end

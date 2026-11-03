@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "securerandom"
+
 module DiscussionBridgeGhost
   # One run's local lock/configuration boundary. Historical binding deliberately
   # excludes credentials and the per-run revision: same-identity rotation can
@@ -7,7 +9,7 @@ module DiscussionBridgeGhost
   class ExecutionContext
     include ProtectedDiagnostics
 
-    attr_reader :installation, :protocol, :transport, :binding
+    attr_reader :installation, :protocol, :transport, :binding, :execution_id
 
     def initialize(installation:, protocol:, transport:, lease:)
       unless transport.is_a?(RackTransport) &&
@@ -26,6 +28,8 @@ module DiscussionBridgeGhost
       @revision = installation.configuration_revision
       @target_id = installation.native_target_id
       @binding = current_binding
+      # Per-run transport attribution, not a historical binding or wire field.
+      @execution_id = SecureRandom.uuid.freeze
     end
 
     def bound_to?(installation:, protocol:, transport:, lease:)
