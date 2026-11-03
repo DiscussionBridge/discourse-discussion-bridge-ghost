@@ -4,10 +4,12 @@ require "base64"
 require "digest"
 require "securerandom"
 require "time"
+require_relative "native_effect_verifier"
 
 module DiscussionBridgeGhost
   # Local safety bookkeeping, NOT an effect executor or an ownership verifier.
-  # No method sends HTTP, acknowledges receiver work or declares native success.
+  # No method sends HTTP or acknowledges receiver work. Physical completion
+  # requires the actual verifier's original response and complete native proof.
   # An unresolved command blocks BOTH directions, including after a new work ID
   # or installation is selected for the same target. A later verifier must supply
   # a separately reviewed positive-completion path; observations alone cannot
@@ -59,6 +61,8 @@ module DiscussionBridgeGhost
       kind
       value
     ].sort.freeze
+
+    attr_reader :context
 
     def initialize(context:, now: -> { Time.now.utc })
       unless context.is_a?(ExecutionContext)
@@ -147,7 +151,9 @@ module DiscussionBridgeGhost
       attempt =
         @context.commit do
           command, state = load_state(command_id)
-          raise Error.new("identity_conflict") if state.fetch("pending_attempt")
+          if state.fetch("pending_attempt") || state["completion"]
+            raise Error.new("identity_conflict")
+          end
           identity = {
             "command_id" => command_id,
             "attempt_id" => SecureRandom.uuid,
@@ -229,8 +235,64 @@ module DiscussionBridgeGhost
     def retained(command_id)
       @context.outside_transaction!
       @context.assert!
-      command, state = load_state(command_id)
-      snapshot("command" => command, "state" => state)
+      command, state, response = load_state(command_id)
+      snapshot("command" => command, "state" => state, "response" => response)
+    end
+
+    # The immutable original command remains terminal forever. Remove only its
+    # temporary exclusion rows after a checked terminal event is committed in
+    # the SAME transaction. Ownership and URL reservations are not these rows.
+    # Replaying an old completed ID cannot reconstruct or re-execute its write.
+    def retain_completion(command_id, verifier:, evidence:)
+      unless verifier.is_a?(NativeEffectVerifier) &&
+               verifier.context.equal?(@context)
+        raise Error.new("identity_conflict")
+      end
+      value = verifier.actual_evidence(evidence)
+      raise Error.new("identity_conflict") unless value
+      @context.commit do
+        command, state, response = load_state(command_id)
+        raise Error.new("identity_conflict") if state["completion"]
+        validate_completion!(command, state, response, value)
+        # A draft create discovers an alias not present in original intent.
+        # Acquire it before recording completion; keep original native_id=nil.
+        native_claim = "native:#{value.fetch("native_id")}"
+        extra =
+          command.fetch("claims").include?(native_claim) ? [] : [native_claim]
+        assert_claims_clear!(extra) unless extra.empty?
+        extra.each do |claim|
+          create_record(
+            "native_barrier",
+            claim,
+            {
+              "format" => "ghost-native-barrier-1",
+              "binding" => @binding,
+              "command_id" => command_id,
+              "claim" => claim
+            }
+          )
+        end
+        completion =
+          snapshot(
+            value.merge(
+              "released_claims" => (command.fetch("claims") + extra).sort
+            )
+          )
+        append(command, state, "effect_completed", completion)
+        rows =
+          @installation.operational_records.where(
+            kind: "native_barrier",
+            record_key: completion.fetch("released_claims")
+          )
+        unless rows.count == completion.fetch("released_claims").length &&
+                 rows.all? { |row|
+                   row.private_payload["command_id"] == command_id
+                 }
+          raise Error.new("identity_conflict")
+        end
+        rows.delete_all
+        completion
+      end
     end
 
     # Ordinary To delivery/move writers must also consult this shared barrier.
@@ -511,23 +573,7 @@ module DiscussionBridgeGhost
       command = record("native_command", command_id)&.private_payload
       validate_command!(command, command_id)
       state = initial_state(command)
-      barriers =
-        @installation.operational_records.where(
-          kind: "native_barrier",
-          record_key: command.fetch("claims")
-        )
-      unless barriers.count == command.fetch("claims").length &&
-               barriers.all? { |row|
-                 row.private_payload ==
-                   {
-                     "format" => "ghost-native-barrier-1",
-                     "binding" => @binding,
-                     "command_id" => command_id,
-                     "claim" => row.record_key
-                   }
-               }
-        raise Error.new("identity_conflict")
-      end
+      response = nil
       @installation
         .operational_records
         .where(kind: "native_event")
@@ -548,24 +594,60 @@ module DiscussionBridgeGhost
           end
           uuid!(event["observer_execution_id"])
           Time.iso8601(event.fetch("observed_at"))
+          if event["kind"] == "effect_completed"
+            unless event["value"].is_a?(Hash)
+              raise Error.new("identity_conflict")
+            end
+            validate_completion!(
+              command,
+              state,
+              response,
+              event.fetch("value").except("released_claims")
+            )
+          end
           apply_event(state, event, command)
+          if event["kind"] == "attempt_started"
+            response = nil
+          elsif event["kind"] == "dispatch_observed"
+            response = event.dig("value", "response")
+          end
           state["event_count"] = sequence
           state["last_event_sha256"] = Digest::SHA256.hexdigest(
             JSON.generate(event)
           )
         end
+      unless state["completion"]
+        barriers =
+          @installation.operational_records.where(
+            kind: "native_barrier",
+            record_key: command.fetch("claims")
+          )
+        unless barriers.count == command.fetch("claims").length &&
+                 barriers.all? { |row|
+                   row.private_payload ==
+                     {
+                       "format" => "ghost-native-barrier-1",
+                       "binding" => @binding,
+                       "command_id" => command_id,
+                       "claim" => row.record_key
+                     }
+                 }
+          raise Error.new("identity_conflict")
+        end
+      end
       progress = record("native_progress", command_id)
       stored = progress&.private_payload
       unless stored.is_a?(Hash) && stored == state &&
                stored["event_count"].is_a?(Integer)
         raise Error.new("identity_conflict")
       end
-      [snapshot(command), state]
+      [snapshot(command), state, response]
     rescue KeyError, ArgumentError, TypeError
       raise Error.new("identity_conflict"), cause: nil
     end
 
     def apply_event(state, event, command)
+      raise Error.new("identity_conflict") if state["completion"]
       value = event.fetch("value")
       case event.fetch("kind")
       when "attempt_started"
@@ -639,9 +721,50 @@ module DiscussionBridgeGhost
         end
       when "native_observed"
         raise Error.new("identity_conflict") unless value.is_a?(Hash)
+      when "effect_completed"
+        expected_claims =
+          (
+            command.fetch("claims") + ["native:#{value.fetch("native_id")}"]
+          ).uniq.sort
+        unless value.fetch("released_claims") == expected_claims
+          raise Error.new("identity_conflict")
+        end
+        state["completion"] = value
       else
         raise Error.new("identity_conflict")
       end
+    end
+
+    def validate_completion!(command, state, response, value)
+      fields = %w[
+        format
+        binding
+        command_id
+        command_sha256
+        response_sha256
+        native_id
+        kind
+        native
+      ].sort
+      unless state.fetch("pending_attempt") &&
+               state.fetch("dispatch_recorded") && response &&
+               value.is_a?(Hash) && value.keys.sort == fields &&
+               value["format"] == "ghost-native-effect-1" &&
+               value["binding"] == @binding &&
+               value["command_id"] == command.fetch("command_id") &&
+               value["command_sha256"] == state.fetch("command_sha256") &&
+               value["response_sha256"] ==
+                 Digest::SHA256.hexdigest(JSON.generate(response)) &&
+               value["kind"] == command.dig("identity", "kind") &&
+               value["native_id"] == value.dig("native", "id")
+        raise Error.new("identity_conflict")
+      end
+      document = NativeDocument.new(command)
+      original =
+        document.response_object(
+          Base64.strict_decode64(response.fetch("body_base64"))
+        )
+      document.verify!(response: original, current: value.fetch("native"))
     end
 
     def event_key(id, sequence)

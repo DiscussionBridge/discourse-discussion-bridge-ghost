@@ -28,5 +28,7 @@ jobs:
         run: ruby test/ghost_http_test.rb
       - name: Run ownership receipt fingerprint vectors
         run: ruby test/ownership_receipt_test.rb
+      - name: Run native effect readback and preservation vectors
+        run: ruby test/native_document_test.rb
       - name: Verify unfinished package and protocol identities
         run: ruby scripts/check-development.rb

@@ -2,6 +2,7 @@
 
 require "rails_helper"
 require_relative "../../lib/discussion_bridge_ghost/native_command_journal"
+require_relative "../../lib/discussion_bridge_ghost/native_executor"
 
 RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
   self.use_transactional_tests = false
@@ -186,6 +187,252 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
       .operational_records
       .order(:id)
       .pluck(:id, :kind, :record_key, :encrypted_payload)
+  end
+
+  def completed_response(journal, context, args)
+    command = journal.prepare(**args)
+    native =
+      args.fetch(:candidate).merge(
+        "id" => args.dig(:identity, "native_id") || "a" * 24,
+        "type" => args.dig(:identity, "kind"),
+        "updated_at" => "2026-11-03T10:01:00.000Z"
+      )
+    response = { "#{args.dig(:identity, "kind")}s" => [native] }
+    stub_request(
+      args.dig(:request, "method").downcase.to_sym,
+      @installation.native_target.admin_origin + args.dig(:request, "path")
+    ).to_return(
+      status: args.dig(:request, "allowed_statuses").first,
+      headers: {
+        "Content-Type" => "application/json"
+      },
+      body: JSON.generate(response)
+    )
+    http = native_http(context)
+    attempt = journal.begin_attempt(args.fetch(:command_id), http: http)
+    outcome = send_command(http, command, attempt)
+    journal.retain_dispatch(
+      args.fetch(:command_id),
+      attempt: attempt,
+      http: http,
+      outcome: outcome
+    )
+    [command, native]
+  end
+
+  def stub_native_reads(args, native, duplicate: false)
+    origin = @installation.native_target.admin_origin
+    kind = args.dig(:identity, "kind")
+    stub_request(
+      :get,
+      %r{#{Regexp.escape(origin)}/ghost/api/admin/#{kind}s/#{native.fetch("id")}/}
+    ).to_return(
+      status: 200,
+      headers: {
+        "Content-Type" => "application/json"
+      },
+      body: JSON.generate("#{kind}s" => [native])
+    )
+    %w[post page].each do |queried|
+      values =
+        queried == kind || duplicate ? [native.merge("type" => queried)] : []
+      stub_request(
+        :get,
+        %r{#{Regexp.escape(origin)}/ghost/api/admin/#{queried}s/\?filter=}
+      ).to_return(
+        status: 200,
+        headers: {
+          "Content-Type" => "application/json"
+        },
+        body: JSON.generate("#{queried}s" => values)
+      )
+    end
+  end
+
+  it "recovers a completed create response after restart without another POST, preserves original identity, and retains a terminal history after release" do
+    args = arguments
+    native = nil
+    with_journal do |journal, context|
+      _command, native = completed_response(journal, context, args)
+    end
+    stub_native_reads(args, native)
+    with_journal do |journal, context|
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: journal,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      completion = executor.recover(args.fetch(:command_id))
+      expect(completion.fetch("native_id")).to eq(native.fetch("id"))
+      expect(completion.fetch("released_claims")).to include(
+        "native:#{native.fetch("id")}"
+      )
+      retained = journal.retained(args.fetch(:command_id))
+      expect(retained.dig("command", "identity", "native_id")).to eq(nil)
+      expect(retained.dig("command", "owner")).to eq(args.fetch(:owner))
+      expect(retained.dig("state", "completion", "native", "status")).to eq(
+        "draft"
+      )
+      expect(
+        @installation.operational_records.where(kind: "native_barrier").count
+      ).to eq(0)
+      expect(executor.recover(args.fetch(:command_id))).to eq(completion)
+      expect {
+        journal.begin_attempt(
+          args.fetch(:command_id),
+          http: native_http(context)
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(journal.prepare(**args)).to eq(retained.fetch("command"))
+    end
+    with_journal do |journal, _context|
+      expect(
+        journal.retained(args.fetch(:command_id)).dig(
+          "state",
+          "completion",
+          "native_id"
+        )
+      ).to eq(native.fetch("id"))
+    end
+    expect(
+      a_request(
+        :post,
+        @installation.native_target.admin_origin + args.dig(:request, "path")
+      )
+    ).to have_been_made.once
+  end
+
+  it "keeps a possible delayed create blocked despite an empty lookup and never sends during recovery" do
+    args = arguments
+    with_journal do |journal, context|
+      journal.prepare(**args)
+      journal.begin_attempt(args.fetch(:command_id), http: native_http(context))
+    end
+    with_journal do |journal, context|
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: journal,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      expect { executor.recover(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error,
+        "native_effect_uncertain"
+      )
+      expect { executor.execute(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error,
+        "native_effect_uncertain"
+      )
+      expect(
+        journal.retained(args.fetch(:command_id)).dig("state", "completion")
+      ).to eq(nil)
+      expect(
+        @installation.operational_records.where(kind: "native_barrier").count
+      ).to eq(2)
+    end
+    expect(a_request(:any, /ghost-native-/)).not_to have_been_made
+  end
+
+  it "does not release an allowed response with mismatched readback or duplicate native identity across kinds" do
+    args = arguments
+    with_journal do |journal, context|
+      _command, native = completed_response(journal, context, args)
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: journal,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      stub_native_reads(args, native.merge("title" => "Someone else's edit"))
+      expect { executor.recover(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      stub_native_reads(args, native, duplicate: true)
+      expect { executor.recover(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect(
+        journal.retained(args.fetch(:command_id)).dig("state", "completion")
+      ).to eq(nil)
+      expect(
+        @installation.operational_records.where(kind: "native_barrier").count
+      ).to eq(2)
+    end
+  end
+
+  it "rolls back alias, completion and release together when the short receipt commit fails" do
+    args = arguments
+    with_journal do |journal, context|
+      _command, native = completed_response(journal, context, args)
+      stub_native_reads(args, native)
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: journal,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      scope = @installation.operational_records
+      allow(scope).to receive(:create!).and_wrap_original do |original, *values|
+        result = original.call(*values)
+        if values.first[:kind] == "native_event" &&
+             result.private_payload["kind"] == "effect_completed"
+          raise DiscussionBridgeGhost::Error.new(
+                  "SYNTHETIC-local-commit-failure"
+                )
+        end
+        result
+      end
+      expect { executor.recover(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect(
+        journal.retained(args.fetch(:command_id)).dig("state", "completion")
+      ).to eq(nil)
+      expect(
+        @installation.operational_records.where(kind: "native_barrier").count
+      ).to eq(2)
+      allow(scope).to receive(:create!).and_call_original
+      expect(
+        executor.recover(args.fetch(:command_id)).fetch("native_id")
+      ).to eq(native.fetch("id"))
+    end
+    expect(
+      a_request(
+        :post,
+        @installation.native_target.admin_origin + args.dig(:request, "path")
+      )
+    ).to have_been_made.once
+  end
+
+  it "rejects a discovered native alias reserved by another installation on the same target" do
+    args = arguments
+    other = make_installation(@installation.native_target)
+    with_journal(other) do |other_journal, _other_context|
+      conflict = arguments(action: "publish")
+      conflict[:baseline]["slug"] = "different-reserved-slug"
+      conflict[:candidate]["slug"] = "different-reserved-slug"
+      conflict[:request]["body_bytes"] = JSON.generate(
+        "posts" => [conflict[:candidate]]
+      )
+      other_journal.prepare(**conflict)
+    end
+    with_journal do |journal, context|
+      _command, native = completed_response(journal, context, args)
+      stub_native_reads(args, native)
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: journal,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      expect { executor.recover(args.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect(
+        journal.retained(args.fetch(:command_id)).dig("state", "completion")
+      ).to eq(nil)
+    end
   end
 
   it "commits exact intent and attempt before HTTP and retains responses without declaring publication success" do

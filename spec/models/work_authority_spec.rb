@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require "rails_helper"
+require_relative "../../lib/discussion_bridge_ghost/native_command_journal"
+require_relative "../../lib/discussion_bridge_ghost/native_executor"
 
 RSpec.describe DiscussionBridgeGhost::WorkAuthority do
   self.use_transactional_tests = false
@@ -272,6 +274,149 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       else
         Rails.application.call(env)
       end
+    end
+  end
+
+  it "executes durable exact draft bytes under actual current V4 authority without acknowledging public publication" do
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      native_journal =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      command_id = SecureRandom.uuid
+      fields = {
+        "title" => "Native execution fixture",
+        "slug" => "article",
+        "status" => "draft",
+        "tags" => [
+          { "name" => "#discussionbridge-resource-#{@record.resource_id}" }
+        ]
+      }
+      exact = " #{JSON.generate("posts" => [fields])}\n"
+      native_journal.prepare(
+        command_id: command_id,
+        identity: {
+          "resource_id" => @record.resource_id,
+          "kind" => "post",
+          "native_id" => nil
+        },
+        owner: {
+          "direction" => "from_discourse",
+          "action" => "create_draft",
+          "mapping_id" => @mapping.mapping_id,
+          "work_id" => @work.work_id,
+          "generation" => lease.fetch("lease_generation"),
+          "source_revision" => @work.source_revision,
+          "external_id" => @binding.external_id,
+          "move_id" => nil,
+          "proof_nonce" => nil
+        },
+        request: {
+          "method" => "POST",
+          "path" => "/ghost/api/admin/posts/",
+          "body_bytes" => exact,
+          "maximum_bytes" => 262_144,
+          "allowed_statuses" => [201]
+        },
+        baseline: nil,
+        candidate: fields
+      )
+      native =
+        fields.merge(
+          "id" => "a" * 24,
+          "type" => "post",
+          "updated_at" => "2026-11-03T16:00:00.000Z"
+        )
+      origin = @target.admin_origin
+      post =
+        stub_request(:post, origin + "/ghost/api/admin/posts/").with(
+          body: exact
+        ).to_return(
+          status: 201,
+          headers: {
+            "Content-Type" => "application/json"
+          },
+          body: JSON.generate("posts" => [native])
+        )
+      stub_request(
+        :get,
+        %r{#{Regexp.escape(origin)}/ghost/api/admin/posts/#{native.fetch("id")}/}
+      ).to_return(
+        status: 200,
+        headers: {
+          "Content-Type" => "application/json"
+        },
+        body: JSON.generate("posts" => [native])
+      )
+      %w[post page].each do |kind|
+        stub_request(
+          :get,
+          %r{#{Regexp.escape(origin)}/ghost/api/admin/#{kind}s/\?filter=}
+        ).to_return(
+          status: 200,
+          headers: {
+            "Content-Type" => "application/json"
+          },
+          body: JSON.generate("#{kind}s" => (kind == "post" ? [native] : []))
+        )
+      end
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: native_journal,
+          authority: held,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      completion = executor.execute(command_id)
+      expect(completion.dig("native", "status")).to eq("draft")
+      expect(executor.execute(command_id)).to eq(completion)
+      expect(post).to have_been_requested.once
+      expect(@work.reload.state).to eq("leased")
+      expect(@mapping.reload.destination_native_id).to eq(nil)
+      expect(state.fetch("next_renewal")).to be >= 3
+    end
+  end
+
+  it "does not let a current From lease authorize another generation, resource, To move or From move" do
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      command = {
+        "binding" => context.binding,
+        "identity" => {
+          "resource_id" => @record.resource_id
+        },
+        "owner" => {
+          "direction" => "from_discourse",
+          "action" => "create_draft",
+          "mapping_id" => @mapping.mapping_id,
+          "work_id" => @work.work_id,
+          "generation" => lease.fetch("lease_generation"),
+          "source_revision" => @work.source_revision,
+          "external_id" => @binding.external_id,
+          "move_id" => nil,
+          "proof_nonce" => nil
+        }
+      }
+      [
+        { "direction" => "to_discourse", "action" => "source_move" },
+        { "generation" => lease.fetch("lease_generation") + 1 },
+        { "work_id" => SecureRandom.uuid },
+        { "action" => "withdraw" },
+        { "move_id" => SecureRandom.uuid, "proof_nonce" => "x" * 64 }
+      ].each do |delta|
+        expect {
+          held.guard_native!(
+            command.merge("owner" => command["owner"].merge(delta))
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+      end
+      expect {
+        held.guard_native!(
+          command.merge("identity" => { "resource_id" => SecureRandom.uuid })
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(@installation.mutations.where(route_id: "V4-15").count).to eq(0)
     end
   end
 

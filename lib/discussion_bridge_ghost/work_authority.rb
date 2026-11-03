@@ -33,6 +33,44 @@ module DiscussionBridgeGhost
     ].freeze
     MINIMUM_REMAINING_SECONDS = 15 # Ghost HTTP is bounded to 10 seconds.
 
+    def bound_to?(context)
+      @context.equal?(context)
+    end
+
+    # Exact ordinary From intent, not a generic callback granting arbitrary
+    # native writes. URL moves have additional authority and are refused here.
+    def guard_native!(command)
+      owner = command.fetch("owner")
+      expected_action =
+        (
+          if @identity.fetch("action") == "withdraw"
+            ["withdraw"]
+          else
+            %w[create_draft publish]
+          end
+        )
+      unless command.fetch("binding") == @context.binding &&
+               command.dig("identity", "resource_id") ==
+                 @mapping.fetch("resource_id") &&
+               owner.fetch("direction") == "from_discourse" &&
+               owner.fetch("mapping_id") == @identity.fetch("mapping_id") &&
+               owner.fetch("work_id") == @identity.fetch("work_id") &&
+               owner.fetch("generation") ==
+                 @identity.fetch("lease_generation") &&
+               owner.fetch("source_revision") ==
+                 @identity.fetch("source_revision") &&
+               owner.fetch("external_id") == @mapping.fetch("external_id") &&
+               expected_action.include?(owner.fetch("action")) &&
+               owner.fetch("move_id").nil? && owner.fetch("proof_nonce").nil?
+        raise Error.new("work_authority_unavailable")
+      end
+      # The initial native binding is nil throughout the draft/real-ID phase.
+      # A locally discovered draft ID must not impersonate a receiver binding.
+      guard!(operation: :mutate, native_id: @initial_native_id)
+    rescue KeyError, TypeError
+      raise Error.new("identity_conflict"), cause: nil
+    end
+
     def initialize(
       context:,
       journal:,
