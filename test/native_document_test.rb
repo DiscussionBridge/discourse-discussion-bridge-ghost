@@ -150,4 +150,34 @@ class GhostNativeDocumentTest < Minitest::Test
     @command["request"]["body_bytes"] = JSON.generate("posts" => [@fields])
     assert_raises(DiscussionBridgeGhost::Error) { document }
   end
+
+  def test_native_date_format_may_differ_but_precision_and_unrelated_identity_cannot
+    @fields["published_at"] = "2026-11-03T10:00:00Z"
+    @command["request"]["body_bytes"] = JSON.generate("posts" => [@fields])
+    current =
+      @current.merge(
+        "published_at" => "2026-11-03T10:00:00.000Z",
+        "comment_id" => ID,
+        "email" => nil
+      )
+    assert document.verify!(response: current, current: current)
+    assert_raises(DiscussionBridgeGhost::Error) do
+      document.verify!(
+        response: current,
+        current: current.merge("published_at" => "2026-11-03T10:00:00.001Z")
+      )
+    end
+    assert_raises(DiscussionBridgeGhost::Error) do
+      document.verify!(
+        response: current,
+        current: current.merge("comment_id" => "d" * 24)
+      )
+    end
+    assert_raises(DiscussionBridgeGhost::Error) do
+      document.verify!(
+        response: current,
+        current: current.merge("email" => { "id" => "d" * 24 })
+      )
+    end
+  end
 end

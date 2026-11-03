@@ -23,8 +23,14 @@ response through complete native readback without repeating a write. Only that
 checked physical completion releases its temporary exclusion barriers; original
 commands, responses and terminal history remain. A completed draft is not a
 public publication, ownership receipt or receiver acknowledgment. Unknown writes
-without positive completion proof stay blocked. URL-move authority, full owned
-publication preparation, no-response recovery, current/public verification,
+without positive completion proof stay blocked. Prepared From writes now require
+an exact owned-card operation, a fresh command attribute, preserved ownership
+nonce, current native baseline, unrelated editor/metadata preservation and shared
+resource/slug/native-ID collision checks. A draft-to-real-ID transition before
+receiver binding requires a matching retained physical effect, not a copied ID.
+The command attribute does not itself resolve missing-response uncertainty.
+URL-move authority, complete source rendering/metadata preparation, no-response
+recovery, current/public verification,
 coordinators, jobs and administration are still being implemented. Installing
 these unfinished components is not a functional replacement adapter.
 

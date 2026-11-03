@@ -20,8 +20,6 @@ module DiscussionBridgeGhost
       primary_author
       primary_tag
       count
-      email
-      comment_id
     ].freeze
     WRITABLE = %w[
       id
@@ -188,6 +186,13 @@ module DiscussionBridgeGhost
     end
 
     def equivalent?(key, expected, actual)
+      if key == "published_at" && expected.is_a?(String) && actual.is_a?(String)
+        begin
+          return Time.iso8601(expected) == Time.iso8601(actual)
+        rescue ArgumentError
+          return false
+        end
+      end
       if %w[authors tags].include?(key)
         unless expected.is_a?(Array) && actual.is_a?(Array) &&
                  expected.length == actual.length
