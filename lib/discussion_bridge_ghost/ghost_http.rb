@@ -34,9 +34,16 @@ module DiscussionBridgeGhost
       guard:,
       api_key: nil,
       factory: nil,
-      now: -> { Time.now.to_i }
+      now: -> { Time.now.to_i },
+      deadline_seconds: 10
     )
-      raise Error.new("configuration_invalid") unless guard.respond_to?(:call)
+      valid_deadline =
+        guard.respond_to?(:call) &&
+          (deadline_seconds.is_a?(Integer) || deadline_seconds.is_a?(Float)) &&
+          deadline_seconds.finite? && deadline_seconds.positive? &&
+          deadline_seconds <= 10
+      raise Error.new("configuration_invalid") unless valid_deadline
+      @deadline_seconds = deadline_seconds
       @origin = protocol.origin_key(origin).freeze
       @address = URI.parse(@origin)
       @guard, @now = guard, now
@@ -54,7 +61,8 @@ module DiscussionBridgeGhost
       payload: nil,
       authenticated: false,
       media: "json",
-      allowed_statuses: [200]
+      allowed_statuses: [200],
+      retained_body: nil
     )
       unless %w[GET POST PUT].include?(method) && path.is_a?(String) &&
                path.ascii_only? && path.start_with?("/") &&
@@ -68,13 +76,19 @@ module DiscussionBridgeGhost
                }
         raise Error.new("configuration_invalid")
       end
-      unless (
-               !authenticated ||
-                 (@api_key && path.start_with?("/ghost/api/admin/"))
-             ) && (method != "GET" || payload.nil?) &&
-               (authenticated || method == "GET")
-        raise Error.new("configuration_invalid")
-      end
+      valid_body =
+        retained_body.nil? ||
+          (
+            payload.nil? && retained_body.is_a?(String) &&
+              retained_body.dup.force_encoding(Encoding::UTF_8).valid_encoding?
+          )
+      raise Error.new("configuration_invalid") unless valid_body
+      valid_authority =
+        (
+          !authenticated || (@api_key && path.start_with?("/ghost/api/admin/"))
+        ) && (method != "GET" || (payload.nil? && retained_body.nil?)) &&
+          (authenticated || method == "GET")
+      raise Error.new("configuration_invalid") unless valid_authority
       # Validate the whole address without normalizing navigable dot segments or
       # introducing another authority. All API paths are assembled by the client.
       uri = URI.parse(@origin + path)
@@ -90,7 +104,7 @@ module DiscussionBridgeGhost
       end
       @guard.call
       response = nil
-      Timeout.timeout(10) do
+      Timeout.timeout(@deadline_seconds) do
         http = @factory.call(@address.hostname, @address.port)
         http.use_ssl = true
         http.verify_mode = OpenSSL::SSL::VERIFY_PEER
@@ -99,17 +113,21 @@ module DiscussionBridgeGhost
         http.write_timeout = 3
         http.max_retries = 0
         headers = {
-          "Accept" =>
-            media == "json" ?
-              "application/json" :
-              media == "html" ? "text/html" : "*/*",
+          "Accept" => {
+            "json" => "application/json",
+            "html" => "text/html",
+            "any" => "*/*"
+          }.fetch(media),
           "Accept-Encoding" => "identity",
           "User-Agent" => "DiscussionBridge-Ghost-native/0.4.0-alpha.1"
         }
         headers[
           "Authorization"
         ] = "Ghost #{AdminToken.generate(@api_key, now: @now.call)}" if authenticated
-        body = payload.nil? ? nil : JSON.generate(payload)
+        body =
+          (
+            retained_body || (payload.nil? ? nil : JSON.generate(payload))
+          )&.dup&.freeze
         headers["Content-Type"] = "application/json; charset=utf-8" if body
         klass = {
           "GET" => Net::HTTP::Get,
@@ -127,7 +145,7 @@ module DiscussionBridgeGhost
                 /\A[0-9]{1,8}\z/.match?(value) ? Integer(value, 10) : nil
               raise Failure.new(status: status, retry_after_seconds: cooldown)
             end
-            unless allowed_statuses.include?(status)
+            if allowed_statuses.index(status).nil?
               raise Failure.new(status: status)
             end
             content_type = incoming["content-type"].to_s
@@ -157,10 +175,13 @@ module DiscussionBridgeGhost
             end
             bytes = +"".b
             incoming.read_body do |chunk|
-              unless chunk.bytesize <= maximum_bytes - bytes.bytesize
+              if chunk.bytesize > maximum_bytes - bytes.bytesize
                 raise Failure.new(status: status)
               end
               bytes << chunk.b
+            end
+            if declared && bytes.bytesize != declared.to_i
+              raise Failure.new(status: status)
             end
             retained_headers =
               %w[content-type content-encoding location retry-after]

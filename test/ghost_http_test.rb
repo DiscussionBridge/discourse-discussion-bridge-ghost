@@ -75,7 +75,7 @@ class GhostNativeHttpTest < Minitest::Test
     end
   end
 
-  def transport(incoming, guard: -> {}, key: KEY)
+  def transport(incoming, guard: -> {}, key: KEY, deadline_seconds: 10)
     @connection = Connection.new(incoming)
     DiscussionBridgeGhost::GhostHttp.new(
       origin: "https://ghost.example",
@@ -83,6 +83,7 @@ class GhostNativeHttpTest < Minitest::Test
       api_key: key,
       guard: guard,
       now: -> { 1_800_000_000 },
+      deadline_seconds: deadline_seconds,
       factory: ->(host, port) do
         assert_equal ["ghost.example", 443], [host, port]
         @connection
@@ -157,6 +158,7 @@ class GhostNativeHttpTest < Minitest::Test
   def test_declared_and_streaming_budgets_bad_media_and_encoding_fail_closed
     [
       Incoming.new(200, "{}", "content-length" => "101"),
+      Incoming.new(200, "{}", "content-length" => "10"),
       Incoming.new(200, ["a" * 60, "b" * 60]),
       Incoming.new(200, "{}", "content-type" => "text/html"),
       Incoming.new(200, "{}", "content-encoding" => "gzip")
@@ -223,6 +225,57 @@ class GhostNativeHttpTest < Minitest::Test
     assert @connection.closed
   end
 
+  class SlowBody < Incoming
+    attr_reader :entered_body
+
+    def read_body
+      @entered_body = true
+      sleep 0.2
+      yield "{}"
+    end
+  end
+
+  def test_one_deadline_covers_body_reading_and_closes_the_connection
+    incoming = SlowBody.new
+    http = transport(incoming, deadline_seconds: 0.02)
+    error =
+      assert_raises(DiscussionBridgeGhost::GhostHttp::Failure) do
+        http.request(
+          "GET",
+          "/ghost/api/admin/posts/",
+          maximum_bytes: 100,
+          authenticated: true
+        )
+      end
+    assert incoming.entered_body
+    assert @connection.closed
+    assert_nil error.cause
+  end
+
+  def test_native_mutation_can_send_its_retained_exact_body_bytes
+    raw = " {\"posts\": [] }\n"
+    http = transport(Incoming.new)
+    http.request(
+      "POST",
+      "/ghost/api/admin/posts/",
+      maximum_bytes: 100,
+      authenticated: true,
+      retained_body: raw
+    )
+    assert_equal raw.b, @connection.requests.first.body.b
+    assert_raises(DiscussionBridgeGhost::Error) do
+      http.request(
+        "POST",
+        "/ghost/api/admin/posts/",
+        maximum_bytes: 100,
+        authenticated: true,
+        retained_body: raw,
+        payload: {
+        }
+      )
+    end
+  end
+
   class ReadTransport
     attr_reader :paths
 
@@ -267,6 +320,7 @@ class GhostNativeHttpTest < Minitest::Test
       JSON.generate("posts" => [{ "id" => OTHER_ID }]),
       JSON.generate("posts" => [{ "id" => ID, "type" => "page" }]),
       '{"posts":[],"posts":[]}',
+      '{"posts":[{"id":"1234567890abcdef12345678","metric":1e999}]}',
       "{\"posts\":[\"\xff\"]}".b
     ].each do |raw|
       client =

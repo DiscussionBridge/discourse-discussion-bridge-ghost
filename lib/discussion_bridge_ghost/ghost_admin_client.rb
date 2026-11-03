@@ -15,10 +15,10 @@ module DiscussionBridgeGhost
     end
 
     def get(id, kind: "post", maximum_bytes: 262_144, source: false)
-      unless id.is_a?(String) && /\A[a-f0-9]{24}\z/.match?(id) &&
-               (!source || kind == "post")
-        raise Error.new("identity_conflict")
-      end
+      valid_id =
+        id.is_a?(String) && /\A[a-f0-9]{24}\z/.match?(id) &&
+          (!source || kind == "post")
+      raise Error.new("identity_conflict") unless valid_id
       resource = resource_type(kind)
       query = "formats=html,lexical&include=authors,tags"
       data = read("/ghost/api/admin/#{resource}/#{id}/?#{query}", maximum_bytes)
@@ -69,20 +69,19 @@ module DiscussionBridgeGhost
         )
       items = data[resource]
       pagination = data.dig("meta", "pagination")
-      unless items.is_a?(Array) && items.length <= 100 &&
-               pagination.is_a?(Hash) && pagination["page"].is_a?(Integer) &&
-               pagination["page"] == page &&
-               pagination["total"].is_a?(Integer) && pagination["total"] >= 0 &&
-               pagination.key?("next") &&
-               (
-                 pagination["next"].nil? ||
-                   (
-                     pagination["next"].is_a?(Integer) &&
-                       pagination["next"] == page + 1
-                   )
-               )
-        raise Error.new("response_invalid")
-      end
+      valid_page =
+        items.is_a?(Array) && items.length <= 100 && pagination.is_a?(Hash) &&
+          pagination["page"].is_a?(Integer) && pagination["page"] == page &&
+          pagination["total"].is_a?(Integer) && pagination["total"] >= 0 &&
+          pagination.key?("next") &&
+          (
+            pagination["next"].nil? ||
+              (
+                pagination["next"].is_a?(Integer) &&
+                  pagination["next"] == page + 1
+              )
+          )
+      raise Error.new("response_invalid") unless valid_page
       ids =
         items.map do |item|
           unless item.is_a?(Hash) && item["id"].is_a?(String) &&
@@ -92,6 +91,10 @@ module DiscussionBridgeGhost
           end
           item["id"]
         end
+      if items.length > pagination["total"] ||
+           (!pagination["next"].nil? && items.empty?)
+        raise Error.new("response_invalid")
+      end
       raise Error.new("identity_conflict") unless ids.uniq.length == ids.length
       selected_fields =
         kind == "authors" ? %w[id name status] : %w[id name slug]
@@ -118,9 +121,7 @@ module DiscussionBridgeGhost
     end
 
     def resource_type(kind)
-      unless %w[post page].include?(kind)
-        raise Error.new("configuration_invalid")
-      end
+      raise Error.new("configuration_invalid") if %w[post page].index(kind).nil?
       "#{kind}s"
     end
 
@@ -128,14 +129,14 @@ module DiscussionBridgeGhost
       resource = resource_type(kind)
       other = kind == "post" ? "pages" : "posts"
       values = data[resource]
-      unless values.is_a?(Array) && !data.key?(other) &&
-               values.all? { |item|
-                 item.is_a?(Hash) && item["id"].is_a?(String) &&
-                   /\A[a-f0-9]{24}\z/.match?(item["id"]) &&
-                   (!item.key?("type") || item["type"] == kind)
-               }
-        raise Error.new("identity_conflict")
-      end
+      valid_objects =
+        values.is_a?(Array) && !data.key?(other) &&
+          values.all? do |item|
+            item.is_a?(Hash) && item["id"].is_a?(String) &&
+              /\A[a-f0-9]{24}\z/.match?(item["id"]) &&
+              (!item.key?("type") || item["type"] == kind)
+          end
+      raise Error.new("identity_conflict") unless valid_objects
       values.map { |item| item.merge("type" => kind) }
     end
 
@@ -152,10 +153,25 @@ module DiscussionBridgeGhost
         raise Error.new("response_invalid")
       end
       value = JSON.parse(bytes, object_class: WireJson::StrictObject)
-      raise Error.new("response_invalid") unless value.is_a?(Hash)
+      unless value.is_a?(Hash) && finite_numbers?(value)
+        raise Error.new("response_invalid")
+      end
       value
     rescue JSON::ParserError, EncodingError, ArgumentError
       raise Error.new("response_invalid"), cause: nil
+    end
+
+    def finite_numbers?(value)
+      case value
+      when Hash
+        value.values.all? { |member| finite_numbers?(member) }
+      when Array
+        value.all? { |member| finite_numbers?(member) }
+      when Float
+        value.finite?
+      else
+        true
+      end
     end
   end
 end
