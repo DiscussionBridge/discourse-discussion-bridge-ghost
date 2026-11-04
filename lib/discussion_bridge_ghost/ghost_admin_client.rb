@@ -146,12 +146,13 @@ module DiscussionBridgeGhost
                }
         raise Error.new("response_invalid")
       end
-      by_id = items.to_h { |item| [item.fetch("id"), item] }
-      unless by_id.keys.sort == ids.sort && by_id.length == items.length
+      by_id = items.group_by { |item| item.fetch("id") }
+      unless by_id.keys.sort == ids.sort &&
+               by_id.values.all? { |matches| matches.length == 1 }
         raise Error.new("identity_conflict")
       end
       # Native sort order must not change the selected primary author/tag.
-      ids.map { |id| by_id.fetch(id).slice(*fields) }
+      ids.map { |id| by_id.fetch(id).first.slice(*fields) }
     end
 
     private
