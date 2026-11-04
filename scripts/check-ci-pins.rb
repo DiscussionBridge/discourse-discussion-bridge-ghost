@@ -94,10 +94,10 @@ module GhostCiPins
         .fetch("steps")
         .find { |step| step["id"] == "check_tests" }
         .fetch("run")
-    %w[frontend backend system annotations].each do |kind|
-      unless census.include?("'#{kind}'")
-        reject!("A native test type is missing")
-      end
+    unless %w[frontend backend system annotations].all? { |kind|
+             census.include?("'#{kind}'")
+           }
+      reject!("A native test type is missing")
     end
     steps = jobs.fetch("tests").fetch("steps")
     receiver_index =
@@ -127,9 +127,9 @@ module GhostCiPins
       reject!("Receiver checkout is not immutable")
     end
     verification = steps.fetch(verify_index).fetch("run")
-    unless verification.include?(RECEIVER) &&
-             verification.include?("$EXPECTED_CORE") &&
-             verification.include?("$EXPECTED_CONNECTOR")
+    unless [RECEIVER, "$EXPECTED_CORE", "$EXPECTED_CONNECTOR"].all? { |expected|
+             verification.include?(expected)
+           }
       reject!("Actual checkout identity assertions are missing")
     end
     target = steps.find { |step| step["id"] == "core-target" }
