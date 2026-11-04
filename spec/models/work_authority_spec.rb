@@ -1594,11 +1594,13 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
   end
 
   def native_stage_source_policy!
+    @native_stage_category ||= Fabricate(:category)
     config = @connection.reload.cms_configuration.deep_dup
     config.fetch("policy").merge!(
       "selection" => "categories",
-      "category_ids" => [],
+      "category_ids" => [@native_stage_category.id.to_s],
       "include_topic_ids" => [@topic.id.to_s],
+      "exclude_topic_ids" => [],
       "policy_revision" => SecureRandom.uuid
     )
     @connection.update_columns(cms_configuration: config)
@@ -1696,7 +1698,13 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
           prior_fragment: prior
         ),
       "tags" =>
-        native.fetch("tags") +
+        native
+          .fetch("tags")
+          .reject do |tag|
+            DiscussionBridgeGhost::NativeManagement::INTERNAL_TAGS.include?(
+              tag.fetch("name")
+            )
+          end +
           [
             { "id" => "d" * 24, "name" => "#discussionbridge-source" },
             {
@@ -1752,6 +1760,24 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       field_control_initial_publication(context, lease, held, complete: true)
       commands =
         DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      checker =
+        DiscussionBridgeGhost::NativeReadiness.new(
+          context: context,
+          commands: commands,
+          authority: held,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      readiness = checker.capture(event_id: @native_event_id)
+      expect(checker.actual_evidence(readiness)).to eq(readiness.value)
+      expect(checker.actual_evidence(checker.retained(readiness.key))).to eq(
+        nil
+      )
+      copied =
+        DiscussionBridgeGhost::NativeReadiness::Observation.new(
+          key: readiness.key,
+          value: readiness.value
+        )
+      expect(checker.actual_evidence(copied)).to eq(nil)
       stages =
         native_acknowledgements(context, mutations, commands, held, lease)
       synced = stages.synchronize(event_id: @native_event_id)
@@ -1759,6 +1785,9 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       expect(synced.observed.dig("work", "state")).to eq("synchronized")
       expect(synced.historical).to eq(false)
       expect(@mapping.reload.destination_native_id).to eq("a" * 24)
+      # Ghost controls the cleared author field; its later metadata revision
+      # must not block verification of unchanged published content.
+      field_control_edit!("authors", "9" * 24)
       expect { held.guard!(operation: :mutate) }.to raise_error(
         DiscussionBridgeGhost::Error
       )
@@ -1903,6 +1932,336 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         expect(@installation.mutations.where(route_id: "V4-16").count).to eq(1)
       end
     end
+  end
+
+  def stage_observing_app(requests)
+    lambda do |env|
+      if env.fetch("PATH_INFO").end_with?("/acknowledge.json")
+        requests << env.fetch("rack.input").read
+        env.fetch("rack.input").rewind
+      end
+      Rails.application.call(env)
+    end
+  end
+
+  it "does not report an old cached acknowledgement as current after receiver-state loss" do
+    native_stage_source_policy!
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held, complete: true)
+      stages =
+        native_acknowledgements(
+          context,
+          mutations,
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context),
+          held,
+          lease
+        )
+      expect(
+        stages.synchronize(event_id: @native_event_id).result.status
+      ).to eq(200)
+      # Synthetic receiver rollback fixture ONLY. This is not a performed
+      # backup/restore or installed rollback qualification.
+      @work.update!(state: "leased")
+      @mapping.update!(
+        destination_native_id: nil,
+        destination_native_revision: nil,
+        synchronized_source_revision: nil,
+        synchronized_at: nil,
+        native_result: nil
+      )
+      DiscussionBridgeCmsMutationReceipt.where(
+        content_connection_id: @connection.id,
+        route: "acknowledge",
+        path_resource: @work.work_id
+      ).delete_all
+      expect { stages.synchronize(event_id: @native_event_id) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      ) { |error| expect(error.code).to eq("acknowledgement_not_current") }
+      expect(@work.reload.state).to eq("leased")
+      expect(
+        @installation
+          .mutations
+          .where(route_id: "V4-16", state: "completed")
+          .count
+      ).to eq(1)
+      expect(
+        DiscussionBridgeCmsMutationReceipt.where(
+          content_connection_id: @connection.id,
+          route: "acknowledge",
+          path_resource: @work.work_id
+        ).count
+      ).to eq(0)
+    end
+  end
+
+  %w[synchronized verified].each do |lost_stage|
+    it "recovers the exact #{lost_stage} acknowledgement after the receiver replied but the local receipt was interrupted" do
+      native_stage_source_policy!
+      requests = []
+      original_lease = original_intent = nil
+      public_get = nil
+      with_runtime(app: stage_observing_app(requests)) do |context, mutations|
+        native_stage_source(context)
+        lease = original_lease = claim(context, mutations)
+        held = authority(context, mutations, lease)
+        field_control_initial_publication(context, lease, held, complete: true)
+        stages =
+          native_acknowledgements(
+            context,
+            mutations,
+            DiscussionBridgeGhost::NativeCommandJournal.new(context: context),
+            held,
+            lease
+          )
+        public_get =
+          stub_request(:get, @binding.canonical_url).to_return do
+            {
+              status: 200,
+              headers: {
+                "Content-Type" => "text/html"
+              },
+              body:
+                "<!doctype html><html><body>#{@field_control_native.fetch("html")}</body></html>"
+            }
+          end
+        if lost_stage == "verified"
+          stages.synchronize(event_id: @native_event_id)
+        end
+        interrupted = false
+        allow(mutations).to receive(
+          :retain_response
+        ).and_wrap_original do |original, operation, packet, result|
+          if !interrupted && packet.route_id == "V4-16" &&
+               JSON.parse(packet.body_bytes).fetch("stage") == lost_stage
+            interrupted = true
+            raise "synthetic ACK receipt interruption"
+          end
+          original.call(operation, packet, result)
+        end
+        action = lost_stage == "synchronized" ? :synchronize : :verify
+        expect {
+          stages.public_send(action, event_id: @native_event_id)
+        }.to raise_error("synthetic ACK receipt interruption")
+        expect(@work.reload.state).to eq(lost_stage)
+        original_intent =
+          @installation
+            .operational_records
+            .find_by!(
+              kind: DiscussionBridgeGhost::NativeAcknowledgements::ENTRY,
+              record_key:
+                "#{@work.work_id}:#{lease.fetch("lease_generation")}:#{lost_stage}"
+            )
+            .encrypted_payload
+      end
+      with_runtime(app: stage_observing_app(requests)) do |context, mutations|
+        stages =
+          native_acknowledgements(
+            context,
+            mutations,
+            DiscussionBridgeGhost::NativeCommandJournal.new(context: context),
+            authority(context, mutations, original_lease),
+            original_lease
+          )
+        action = lost_stage == "synchronized" ? :synchronize : :verify
+        replay = stages.public_send(action, event_id: @native_event_id)
+        expect(replay.result.status).to eq(200)
+        expect(replay.historical).to eq(true)
+        expect(replay.observed.dig("work", "state")).to eq(lost_stage)
+        expect(
+          @installation
+            .operational_records
+            .find_by!(
+              kind: DiscussionBridgeGhost::NativeAcknowledgements::ENTRY,
+              record_key:
+                "#{@work.work_id}:#{original_lease.fetch("lease_generation")}:#{lost_stage}"
+            )
+            .encrypted_payload
+        ).to eq(original_intent)
+        if lost_stage == "synchronized"
+          expect(stages.verify(event_id: @native_event_id).result.status).to eq(
+            200
+          )
+        end
+      end
+      repeated =
+        requests.select do |bytes|
+          JSON.parse(bytes).fetch("stage") == lost_stage
+        end
+      expect(repeated.length).to eq(2)
+      expect(repeated.last).to eq(repeated.first)
+      expect(@work.reload.state).to eq("verified")
+      expect(
+        DiscussionBridgeCmsMutationReceipt.where(
+          content_connection_id: @connection.id,
+          route: "acknowledge",
+          path_resource: @work.work_id
+        ).count
+      ).to eq(2)
+      expect(public_get).to have_been_requested.once
+      expect(
+        a_request(
+          :post,
+          %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+        )
+      ).to have_been_made.once
+      expect(
+        a_request(
+          :put,
+          %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+        )
+      ).to have_been_made.once
+    end
+  end
+
+  it "resolves an old synchronized acknowledgement as history without granting a superseded lease verification" do
+    native_stage_source_policy!
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held, complete: true)
+      stages =
+        native_acknowledgements(
+          context,
+          mutations,
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context),
+          held,
+          lease
+        )
+      expect(
+        stages.synchronize(event_id: @native_event_id).result.status
+      ).to eq(200)
+      old_work = @work
+      field_control_policy!(authors: [], taxonomy: [])
+      replay = stages.synchronize(event_id: @native_event_id)
+      expect(replay.historical).to eq(true)
+      expect(replay.result.value.dig("work", "state")).to eq("synchronized")
+      expect(replay.observed.dig("work", "state")).to eq("superseded")
+      expect { stages.verify(event_id: @native_event_id) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect(old_work.reload.state).to eq("superseded")
+      expect(@work.reload.state).to eq("pending")
+    end
+    expect(a_request(:get, @binding.canonical_url)).not_to have_been_made
+  end
+
+  it "withdraws and republishes the same owned native post with separate current synchronization and public proofs" do
+    native_stage_source_policy!
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held, complete: true)
+      stages =
+        native_acknowledgements(
+          context,
+          mutations,
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context),
+          held,
+          lease
+        )
+      stages.synchronize(event_id: @native_event_id)
+      stub_request(:get, @binding.canonical_url).to_return(
+        status: 200,
+        headers: {
+          "Content-Type" => "text/html"
+        },
+        body:
+          "<!doctype html><html><body>#{@field_control_native.fetch("html")}</body></html>"
+      )
+      expect(stages.verify(event_id: @native_event_id).result.status).to eq(200)
+    end
+    config = @connection.reload.cms_configuration.deep_dup
+    config.fetch("policy")["include_topic_ids"] = []
+    @connection.update_columns(cms_configuration: config)
+    field_control_policy!(authors: [], taxonomy: [], withdraw: true)
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations, key: "claim:withdraw-stage")
+      held = authority(context, mutations, lease)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      args, = native_arguments(context, lease)
+      fields = {
+        "id" => "a" * 24,
+        "updated_at" => @field_control_native.fetch("updated_at"),
+        "status" => "draft"
+      }
+      args[:baseline] = @field_control_native
+      args[:candidate] = @field_control_native.merge(fields).merge(
+        "management" => held.native_management!(stage: "withdraw").value
+      )
+      args[:request]["body_bytes"] = JSON.generate("posts" => [fields])
+      commands.prepare(**args)
+      DiscussionBridgeGhost::NativeExecutor.new(
+        context: context,
+        journal: commands,
+        authority: held,
+        api_key: "a" * 24 + ":" + "12" * 32
+      ).execute(args.fetch(:command_id))
+      stages =
+        native_acknowledgements(context, mutations, commands, held, lease)
+      expect(stages.synchronize.result.status).to eq(200)
+      stub_request(:get, @binding.canonical_url).to_return(status: 403)
+      expect { stages.verify }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(@work.reload.state).to eq("synchronized")
+      stub_request(:get, @binding.canonical_url).to_return(status: 404)
+      expect(stages.verify.result.status).to eq(200)
+      expect(@mapping.reload.mapping_state).to eq("withdrawn")
+    end
+    native_stage_source_policy!
+    expect(@mapping.reload.mapping_state).to eq("pending")
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations, key: "claim:republish-stage")
+      held = authority(context, mutations, lease)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      args =
+        complete_publication_arguments(
+          context,
+          lease,
+          held,
+          @field_control_native
+        )
+      commands.prepare(**args)
+      DiscussionBridgeGhost::NativeExecutor.new(
+        context: context,
+        journal: commands,
+        authority: held,
+        api_key: "a" * 24 + ":" + "12" * 32
+      ).execute(args.fetch(:command_id))
+      stages =
+        native_acknowledgements(context, mutations, commands, held, lease)
+      expect(
+        stages.synchronize(event_id: @native_event_id).result.status
+      ).to eq(200)
+      stub_request(:get, @binding.canonical_url).to_return(
+        status: 200,
+        headers: {
+          "Content-Type" => "text/html"
+        },
+        body:
+          "<!doctype html><html><body>#{@field_control_native.fetch("html")}</body></html>"
+      )
+      expect(stages.verify(event_id: @native_event_id).result.status).to eq(200)
+      expect(@mapping.reload.destination_native_id).to eq("a" * 24)
+      expect(@mapping.mapping_state).to eq("active")
+    end
+    expect(
+      a_request(
+        :post,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+      )
+    ).to have_been_made.once
+    expect(
+      a_request(
+        :put,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+      )
+    ).to have_been_made.times(3)
   end
 
   %w[authors taxonomy]

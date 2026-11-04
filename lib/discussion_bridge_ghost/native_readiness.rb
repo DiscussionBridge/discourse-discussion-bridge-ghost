@@ -430,12 +430,12 @@ module DiscussionBridgeGhost
         raise Error.new("native_state_not_ready")
       end
       names = tags.map { |tag| tag.fetch("name") }
-      unless names.include?("#discussionbridge-source") &&
-               names.include?(
-                 "#discussionbridge-#{mapping.fetch("presentation_mode")}"
-               )
-        raise Error.new("native_state_not_ready")
-      end
+      ready_tags =
+        names.include?("#discussionbridge-source") &&
+          names.include?(
+            "#discussionbridge-#{mapping.fetch("presentation_mode")}"
+          )
+      raise Error.new("native_state_not_ready") unless ready_tags
     end
 
     def snapshot(value)
