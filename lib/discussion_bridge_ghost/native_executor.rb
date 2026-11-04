@@ -60,7 +60,11 @@ module DiscussionBridgeGhost
         )
       client = GhostAdminClient.new(http: http)
       if command.dig("identity", "native_id")
-        unless @authority.initial_native_id
+        # Managed writes use the bounded protected baseline/root-completion
+        # proof below. Descriptor-free historical fixtures retain their old
+        # physical-assignment check; they are not promoted to managed ownership.
+        unless @authority.initial_native_id ||
+                 command.dig("candidate", "management")
           @journal.assert_local_assignment!(command)
         end
         current =

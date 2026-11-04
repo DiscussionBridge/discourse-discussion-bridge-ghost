@@ -867,6 +867,146 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     expect(a_request(:any, /ghost-authority-/)).not_to have_been_made
   end
 
+  it "retains a managed draft under actual V4 authority and refuses an edited managed baseline before a later PUT" do
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      native_journal =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      args, html =
+        native_arguments(context, lease, native_id: nil, create: true)
+      fields = args.fetch(:candidate).merge("visibility" => "public")
+      management =
+        DiscussionBridgeGhost::NativeManagement.for_policy(
+          protocol: context.protocol,
+          policy: @connection.reload.cms_configuration.fetch("policy"),
+          stage: "create_draft"
+        )
+      args[:candidate] = fields.merge("management" => management.value)
+      args[:request]["body_bytes"] = JSON.generate("posts" => [fields])
+      native =
+        fields.merge(
+          "id" => "a" * 24,
+          "type" => "post",
+          "html" => html,
+          "authors" => [{ "id" => "b" * 24 }],
+          "tags" =>
+            fields.fetch("tags").map { |tag| tag.merge("id" => "c" * 24) },
+          "updated_at" => "2026-11-03T16:01:00.000Z"
+        )
+      created = false
+      %w[post page].each do |kind|
+        stub_request(
+          :get,
+          %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/#{kind}s/\?filter=}
+        ).to_return do
+          {
+            status: 200,
+            headers: {
+              "Content-Type" => "application/json"
+            },
+            body:
+              JSON.generate(
+                "#{kind}s" => (created && kind == "post" ? [native] : [])
+              )
+          }
+        end
+      end
+      stub_request(
+        :post,
+        @target.admin_origin + args.dig(:request, "path")
+      ).to_return do
+        created = true
+        {
+          status: 201,
+          headers: {
+            "Content-Type" => "application/json"
+          },
+          body: JSON.generate("posts" => [native])
+        }
+      end
+      stub_request(
+        :get,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/#{native.fetch("id")}/}
+      ).to_return do
+        {
+          status: 200,
+          headers: {
+            "Content-Type" => "application/json"
+          },
+          body: JSON.generate("posts" => [native])
+        }
+      end
+      native_journal.prepare(**args)
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: native_journal,
+          authority: held,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      completed = executor.execute(args.fetch(:command_id))
+      expect(completed.fetch("native_id")).to eq(native.fetch("id"))
+      saved =
+        DiscussionBridgeGhost::NativeBaselineJournal.new(
+          context: context,
+          journal: native_journal
+        )
+      expect(saved.current(@mapping.mapping_id).assert_current!(native)).to eq(
+        true
+      )
+      expect(executor.execute(args.fetch(:command_id))).to eq(completed)
+      expect(@mapping.reload.destination_native_id).to eq(nil)
+      expect(@work.reload.state).to eq("leased")
+
+      # Ghost has been edited before the next command was prepared. Even its
+      # fresh CAS baseline already contains that change; it must not be blessed.
+      native = native.merge("title" => "An editor changed the managed title")
+      second, = native_arguments(context, lease)
+      fields =
+        second.fetch(:candidate).merge(
+          "visibility" => "public",
+          "published_at" => "2026-11-03T15:00:00.000Z",
+          "updated_at" => native.fetch("updated_at")
+        )
+      management =
+        DiscussionBridgeGhost::NativeManagement.for_policy(
+          protocol: context.protocol,
+          policy: @connection.reload.cms_configuration.fetch("policy"),
+          stage: "publish"
+        )
+      second[:baseline] = native
+      second[:candidate] = native.merge(fields).merge(
+        "management" => management.value
+      )
+      second[:request]["body_bytes"] = JSON.generate("posts" => [fields])
+      native_journal.prepare(**second)
+      before = saved.current(@mapping.mapping_id).sha256
+      expect { executor.execute(second.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      ) { |error| expect(error.code).to eq("identity_conflict") }
+      expect(saved.current(@mapping.mapping_id).sha256).to eq(before)
+      expect(
+        native_journal.retained(second.fetch(:command_id)).dig(
+          "state",
+          "pending_attempt"
+        )
+      ).to eq(nil)
+    end
+    expect(
+      a_request(
+        :post,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+      )
+    ).to have_been_made.once
+    expect(
+      a_request(
+        :put,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/}
+      )
+    ).not_to have_been_made
+  end
+
   it "does not let a current From lease authorize another generation, resource, To move or From move" do
     with_runtime do |context, mutations|
       lease = claim(context, mutations)
