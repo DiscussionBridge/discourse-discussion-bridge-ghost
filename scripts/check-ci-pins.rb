@@ -7,7 +7,7 @@ require "yaml"
 # provider-managed runners are bit-reproducible. No writes or network calls.
 module GhostCiPins
   CORE = "acf8e70129f5359635f8227ad8a91a792204147e"
-  RECEIVER = "ac6c7bbc396054372a1bd7d197a3f801c5c20972"
+  RECEIVER = "c34b46ae2bf4d93bb7dcb63d63f175f520110f00"
   IMAGE =
     "discourse/discourse_test@sha256:5df460f3592a1adacc924775b6c690191572d8efe9e51d3f823c38c092d9f6a3"
   ACTIONS = {

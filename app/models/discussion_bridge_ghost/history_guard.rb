@@ -16,10 +16,10 @@ module DiscussionBridgeGhost
       scope = scope.lock if lock
       revision = scope.pick(:revision)
       return nil if revision.nil? && missing && expected.nil?
-      unless revision.is_a?(String) && SecretEnvelope::UUID.match?(revision) &&
-               (expected.nil? || revision == expected)
+      unless revision.is_a?(String) && SecretEnvelope::UUID.match?(revision)
         raise Error.new("identity_conflict")
       end
+      raise Error.new("identity_conflict") if expected && revision != expected
       revision
     end
   end

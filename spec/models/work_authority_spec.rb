@@ -1822,8 +1822,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       pages[1].fetch("items")[0]["policy_revision"] = duplicate
       pages[1].fetch("items")[0]["author_ids"] = []
       pages[1].fetch("items")[1]["previous_policy_revision"] = duplicate
-      by_cursor =
-        pages.to_h { |page| [page.fetch("after_policy_revision"), page] }
+      by_cursor = pages.index_by { |page| page.fetch("after_policy_revision") }
       app =
         lambda do |env|
           if env.fetch("PATH_INFO") ==
