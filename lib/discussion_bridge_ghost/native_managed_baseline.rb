@@ -3,6 +3,7 @@
 require_relative "native_command_journal"
 require_relative "native_management"
 require_relative "native_owned_command"
+require_relative "native_field_control_journal"
 
 module DiscussionBridgeGhost
   # A detached last-PROVEN managed state, derived only from the real journal's
@@ -29,17 +30,70 @@ module DiscussionBridgeGhost
         protocol: journal.context.protocol,
         command: command,
         completion: completion,
-        previous: previous
+        previous: previous,
+        released_relations:
+          (
+            if previous.is_a?(self)
+              previous.released_relations(
+                journal: journal,
+                through_generation: command.dig("owner", "generation")
+              )
+            else
+              []
+            end
+          )
       )
     rescue KeyError, TypeError
       raise Error.new("identity_conflict"), cause: nil
     end
 
-    def assert_current!(native, management: nil)
+    def released_relations(journal:, through_generation:)
+      self.class.release_history(
+        journal: journal,
+        value: @value,
+        through_generation: through_generation
+      )
+    end
+
+    # Used only with an enrolled baseline/protected predecessor projection.
+    # Returned historical facts are never a current authorization grant.
+    def self.release_history(journal:, value:, through_generation:)
+      unless journal.is_a?(NativeCommandJournal) &&
+               journal.context.binding == value.fetch("binding")
+        raise Error.new("identity_conflict")
+      end
+      source = journal.retained(value.fetch("content_command_id"))
+      command = source.fetch("command")
+      unless source.dig("state", "completion") &&
+               command.fetch("binding") == value.fetch("binding") &&
+               command.dig("owner", "mapping_id") ==
+                 value.dig("identity", "mapping_id") &&
+               command.dig("identity", "resource_id") ==
+                 value.dig("identity", "resource_id")
+        raise Error.new("identity_conflict")
+      end
+      NativeFieldControlJournal.new(
+        context: journal.context
+      ).released_relations(
+        identity: value.fetch("identity"),
+        after_generation: command.dig("owner", "generation"),
+        through_generation: through_generation
+      )
+    end
+
+    # Pure comparison, not authority. Release facts passed here must originate
+    # in the protected field-control journal at the exact caller's generation.
+    def assert_current!(native, management: nil, released_relations: [])
       unless management.nil? || management.is_a?(NativeManagement)
         raise Error.new("identity_conflict")
       end
-      released = management ? management.released_relations : []
+      unless released_relations.is_a?(Array) &&
+               (released_relations - %w[authors taxonomy]).empty? &&
+               released_relations.uniq == released_relations
+        raise Error.new("identity_conflict")
+      end
+      released =
+        released_relations + (management ? management.released_relations : [])
       current = snapshot(native)
       identity = @value.fetch("identity")
       unless current["id"] == identity.fetch("native_id") &&
@@ -80,7 +134,13 @@ module DiscussionBridgeGhost
 
     private
 
-    def initialize(protocol:, command:, completion:, previous:)
+    def initialize(
+      protocol:,
+      command:,
+      completion:,
+      previous:,
+      released_relations:
+    )
       @maximum = command.dig("request", "maximum_bytes")
       management =
         NativeManagement.new(
@@ -106,7 +166,8 @@ module DiscussionBridgeGhost
         end
         previous.assert_current!(
           command.fetch("baseline"),
-          management: management
+          management: management,
+          released_relations: released_relations
         )
       end
       fragment = fragment_state(native)
@@ -154,7 +215,9 @@ module DiscussionBridgeGhost
           authors:
             (
               if prior_profile
-                if management.released_relations.include?("authors")
+                if (
+                     management.released_relations + released_relations
+                   ).include?("authors")
                   nil
                 else
                   previous.value.fetch("authors")
@@ -166,7 +229,9 @@ module DiscussionBridgeGhost
           taxonomy:
             (
               if prior_profile
-                if management.released_relations.include?("taxonomy")
+                if (
+                     management.released_relations + released_relations
+                   ).include?("taxonomy")
                   nil
                 else
                   previous.value.fetch("taxonomy")
@@ -199,6 +264,7 @@ module DiscussionBridgeGhost
       content_command:,
       content_completion:,
       previous_value:,
+      released_relations:,
       value:
     )
       restored = allocate
@@ -210,6 +276,7 @@ module DiscussionBridgeGhost
         content_command: content_command,
         content_completion: content_completion,
         previous_value: previous_value,
+        released_relations: released_relations,
         value: value
       )
       restored
@@ -223,6 +290,7 @@ module DiscussionBridgeGhost
       content_command:,
       content_completion:,
       previous_value:,
+      released_relations:,
       value:
     )
       @maximum = command.dig("request", "maximum_bytes")
@@ -301,7 +369,10 @@ module DiscussionBridgeGhost
           scalars: scalars,
           authors:
             (
-              if withdrawal && management.released_relations.include?("authors")
+              if withdrawal &&
+                   (
+                     management.released_relations + released_relations
+                   ).include?("authors")
                 nil
               else
                 if withdrawal
@@ -314,7 +385,9 @@ module DiscussionBridgeGhost
           taxonomy:
             (
               if withdrawal &&
-                   management.released_relations.include?("taxonomy")
+                   (
+                     management.released_relations + released_relations
+                   ).include?("taxonomy")
                 nil
               else
                 if withdrawal

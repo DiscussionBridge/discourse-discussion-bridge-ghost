@@ -89,6 +89,11 @@ module DiscussionBridgeGhost
       previous_head = checked_head(mapping.fetch("mapping_id"))
       command =
         @commands.retained(baseline.value.fetch("command_id")).fetch("command")
+      released =
+        baseline.released_relations(
+          journal: @commands,
+          through_generation: work.fetch("lease_generation")
+        )
       maximum = command.dig("request", "maximum_bytes")
       native =
         @client.get(
@@ -96,7 +101,11 @@ module DiscussionBridgeGhost
           kind: identity.fetch("kind"),
           maximum_bytes: maximum
         )
-      baseline.assert_current!(native, management: @capture_management)
+      baseline.assert_current!(
+        native,
+        management: @capture_management,
+        released_relations: released
+      )
       matches =
         @client.find_by_resource(
           identity.fetch("resource_id"),
@@ -107,7 +116,11 @@ module DiscussionBridgeGhost
                matches.first["updated_at"] == native.fetch("updated_at")
         raise Error.new("identity_conflict")
       end
-      baseline.assert_current!(matches.first, management: @capture_management)
+      baseline.assert_current!(
+        matches.first,
+        management: @capture_management,
+        released_relations: released
+      )
       native = matches.first
       @protocol.validate!("Revision", native.fetch("updated_at"))
       # If Ghost reports a canonical URL, it cannot silently replace the owned

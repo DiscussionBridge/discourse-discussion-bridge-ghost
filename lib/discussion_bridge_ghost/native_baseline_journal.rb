@@ -135,11 +135,21 @@ module DiscussionBridgeGhost
             value: command.fetch("candidate").fetch("management")
           )
         management.validate_command!(command)
+        released =
+          previous.released_relations(
+            journal: @commands,
+            through_generation: command.dig("owner", "generation")
+          )
         previous.assert_current!(
           command.fetch("baseline"),
-          management: management
+          management: management,
+          released_relations: released
         )
-        previous.assert_current!(native, management: management)
+        previous.assert_current!(
+          native,
+          management: management,
+          released_relations: released
+        )
       end
       @context.assert!
       true
@@ -320,6 +330,18 @@ module DiscussionBridgeGhost
         content_command: content.fetch("command"),
         content_completion: content.dig("state", "completion"),
         previous_value: previous_value,
+        released_relations:
+          (
+            if previous_value
+              NativeManagedBaseline.release_history(
+                journal: @commands,
+                value: previous_value,
+                through_generation: latest.dig("command", "owner", "generation")
+              )
+            else
+              []
+            end
+          ),
         value: entry.fetch("baseline")
       )
     end

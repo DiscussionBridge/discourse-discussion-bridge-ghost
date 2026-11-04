@@ -4,6 +4,7 @@ require "json"
 require "securerandom"
 require "time"
 require_relative "native_management"
+require_relative "native_field_control_journal"
 
 module DiscussionBridgeGhost
   # From-Discourse work only. A successful guard is short-lived authority, NOT
@@ -70,6 +71,10 @@ module DiscussionBridgeGhost
         native_id: @initial_native_id,
         management: management
       )
+      NativeFieldControlJournal.new(
+        context: @context,
+        authority: self
+      ).observe!(management)
       management
     end
 
@@ -117,11 +122,19 @@ module DiscussionBridgeGhost
       end
       # Descriptor-free development history remains physical evidence only;
       # the forthcoming ownership ledger must not promote it to managed proof.
-      guard!(
-        operation: :mutate,
-        native_id: @initial_native_id,
-        management: management
-      )
+      current =
+        guard!(
+          operation: :mutate,
+          native_id: @initial_native_id,
+          management: management
+        )
+      if management
+        NativeFieldControlJournal.new(
+          context: @context,
+          authority: self
+        ).observe!(management)
+      end
+      current
     rescue KeyError, TypeError
       raise Error.new("identity_conflict"), cause: nil
     end
