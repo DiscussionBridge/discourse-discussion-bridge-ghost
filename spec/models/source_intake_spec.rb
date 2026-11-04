@@ -19,7 +19,7 @@ RSpec.describe DiscussionBridgeGhost::SourceIntake do
     origin = "https://ghost-intake-#{SecureRandom.hex(8)}.example"
     @connection, @secret =
       DiscussionBridgeContentConnection.issue!(
-        name: "Synthetic Ghost source intake",
+        name: "Synthetic Ghost source intake #{SecureRandom.hex(8)}",
         platform: "ghost",
         allowed_origins: [origin],
         allowed_directions: ["from_discourse"],
@@ -92,7 +92,9 @@ RSpec.describe DiscussionBridgeGhost::SourceIntake do
 
   after do
     if @installation&.persisted?
-      @installation.operational_records.delete_all
+      DiscussionBridgeGhost::OperationalRecord.where(
+        installation_id: @installation.id
+      ).delete_all
       @installation.delete
     end
     @target.delete if @target&.persisted?
