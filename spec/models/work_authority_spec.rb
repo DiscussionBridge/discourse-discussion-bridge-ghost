@@ -2240,7 +2240,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
             }
           end
         expect(failure.status).to eq(200)
-        freeze_time(Time.current + 31.seconds)
+        freeze_time(31.seconds.from_now)
         current = claim(context, mutations, key: "claim:after-sync-failure")
         expect(current.dig("work", "work_id")).to eq(
           lease.dig("work", "work_id")
