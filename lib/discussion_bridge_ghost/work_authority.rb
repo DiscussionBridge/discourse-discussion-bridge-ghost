@@ -57,9 +57,7 @@ module DiscussionBridgeGhost
             %w[create_draft publish]
           end
         )
-      unless expected.include?(stage)
-        raise Error.new("work_authority_unavailable")
-      end
+      raise Error.new("work_authority_unavailable") if expected.exclude?(stage)
       policy = read!("V4-01").fetch("policy")
       management =
         NativeManagement.for_policy(

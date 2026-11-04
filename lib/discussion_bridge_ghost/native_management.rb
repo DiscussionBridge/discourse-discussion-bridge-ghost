@@ -41,7 +41,7 @@ module DiscussionBridgeGhost
       raise Error.new("identity_conflict") unless protocol.is_a?(WireProtocol)
       protocol.validate!("Policy", policy)
       raise Error.new("identity_conflict") unless STAGES.key?(stage)
-      unless [LEGACY_FORMAT, FORMAT].include?(format)
+      if [LEGACY_FORMAT, FORMAT].exclude?(format)
         raise Error.new("identity_conflict")
       end
       authors =

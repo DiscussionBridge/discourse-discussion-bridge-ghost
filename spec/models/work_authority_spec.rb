@@ -142,6 +142,23 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     end
     @target.delete if @target&.persisted?
     if @connection&.persisted?
+      uploads =
+        DiscussionBridgeCmsCatalogUpload.where(
+          content_connection_id: @connection.id
+        )
+      DiscussionBridgeCmsCatalogCursor.where(
+        content_connection_id: @connection.id
+      ).delete_all
+      DiscussionBridgeCmsCatalogSnapshot.where(
+        content_connection_id: @connection.id
+      ).delete_all
+      DiscussionBridgeCmsCatalogEntry.where(
+        catalog_upload_id: uploads.select(:id)
+      ).delete_all
+      DiscussionBridgeCmsCatalogPage.where(
+        catalog_upload_id: uploads.select(:id)
+      ).delete_all
+      uploads.delete_all
       DiscussionBridgeCmsMutationReceipt.where(
         content_connection_id: @connection.id
       ).delete_all
@@ -936,6 +953,44 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
   end
 
   it "obtains field releases from actual current V4 policy and rejects stale or wrong-stage descriptors" do
+    # Real selected-catalog availability is a prerequisite for the real receiver
+    # to lease this work. These are native synthetic catalog fixtures, not a
+    # claim that Ghost catalogs were fetched or that the connector is installed.
+    store =
+      DiscussionBridge::CmsCatalogStore.new(
+        @connection,
+        authenticated_secret_digest: @connection.secret_digest
+      )
+    { "authors" => "1" * 24, "taxonomy" => "3" * 24 }.each do |kind, id|
+      upload =
+        store.begin_upload(
+          {
+            "mutation_id" => SecureRandom.uuid,
+            "kind" => kind,
+            "native_revision" => "native:field-control",
+            "total_items" => 1
+          }
+        ).body
+      upload_id = upload.fetch("upload_id")
+      store.append_page(
+        upload_id,
+        {
+          "mutation_id" => SecureRandom.uuid,
+          "page" => 0,
+          "items" => [
+            { "id" => id, "label" => "Synthetic #{kind}", "available" => true }
+          ]
+        }
+      )
+      store.finalize(
+        upload_id,
+        {
+          "mutation_id" => SecureRandom.uuid,
+          "upload_id" => upload_id,
+          "expected_total_items" => 1
+        }
+      )
+    end
     config = @connection.cms_configuration.deep_dup
     config.fetch("policy")["author_ids"] = ["1" * 24]
     @connection.update_columns(cms_configuration: config)
