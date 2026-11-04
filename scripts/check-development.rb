@@ -18,11 +18,11 @@ unless manifest["status"] == "unfinished_implementation_candidate_not_qualified"
   abort "Unexpected acceptance claim"
 end
 unless manifest["normative_sha256"] ==
-         "808042688cbde88fac0acdf1187e4cb8c251e13025bfcf09cf3a3c361ca02003"
+         "98d7904e987fbe306a51632d1fb37d6f78564915d127145027b992ec9a2723dc"
   abort "Wrong normative identity"
 end
 unless manifest["schema_sha256"] ==
-         "e6a15a6d70f7bc8b8ee82aa22a0b9c2ff1bbf2da6277f7087118be9e026ce5c0"
+         "b6ab0efa3247f9c93a76ccb591a2ed9a5b0fd4805427f87e67c72a23b88edd0a"
   abort "Wrong schema identity"
 end
 if File

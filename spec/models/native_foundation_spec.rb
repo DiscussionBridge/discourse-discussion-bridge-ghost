@@ -34,16 +34,16 @@ RSpec.describe DiscussionBridgeGhost do
   it "loads alongside the exact unchanged receiver and pinned Core" do
     expect(DiscussionBridgeGhost::VERSION).to eq("0.4.0-alpha.1")
     expect(DiscussionBridge::CmsProtocol::CONTRACT_SHA256).to eq(
-      "808042688cbde88fac0acdf1187e4cb8c251e13025bfcf09cf3a3c361ca02003"
+      "98d7904e987fbe306a51632d1fb37d6f78564915d127145027b992ec9a2723dc"
     )
     expect(DiscussionBridge::CmsProtocol::SCHEMA_SHA256).to eq(
-      "e6a15a6d70f7bc8b8ee82aa22a0b9c2ff1bbf2da6277f7087118be9e026ce5c0"
+      "b6ab0efa3247f9c93a76ccb591a2ed9a5b0fd4805427f87e67c72a23b88edd0a"
     )
     receiver_root = Rails.root.join("plugins/discourse-discussion-bridge")
     receiver_sha, receiver_status =
       Open3.capture2("git", "-C", receiver_root.to_s, "rev-parse", "HEAD")
     expect(receiver_status.success?).to eq(true)
-    expect(receiver_sha.strip).to eq("685eb3c6be54b8ef41b68949867b884703e2768e")
+    expect(receiver_sha.strip).to eq("4d092ac26f9e3d13a9d6f6b3dfb939a1d1d71619")
     core_sha, core_status =
       Open3.capture2("git", "-C", Rails.root.to_s, "rev-parse", "HEAD")
     expect(core_status.success?).to eq(true)

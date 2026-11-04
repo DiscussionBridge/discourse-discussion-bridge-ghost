@@ -6,6 +6,7 @@ require_relative "../../lib/discussion_bridge_ghost/native_executor"
 require_relative "../../lib/discussion_bridge_ghost/native_ownership_journal"
 require_relative "../../lib/discussion_bridge_ghost/native_acknowledgements"
 require_relative "../../lib/discussion_bridge_ghost/native_metadata_selection"
+require_relative "../../lib/discussion_bridge_ghost/policy_history_intake"
 
 RSpec.describe DiscussionBridgeGhost::WorkAuthority do
   self.use_transactional_tests = false
@@ -198,6 +199,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       @mapping.delete if @mapping&.persisted?
       @binding.delete if @binding&.persisted?
       @record.delete if @record&.persisted?
+      DiscussionBridgeCmsConfigurationEvent.where(content_connection_id: @connection.id).delete_all
       @connection.delete
     end
   end
@@ -1418,6 +1420,109 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         }
       )
     end
+  end
+
+  it "recovers an offline clear/reselect only after restartable complete history verification" do
+    field_control_catalogs!
+    audited_field_control_policy!(authors: ["1" * 24], taxonomy: ["3" * 24])
+    original_command = original_baseline = baseline = nil
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations, key: "claim:history-baseline")
+      held = authority(context, mutations, lease)
+      original_command = field_control_initial_publication(context, lease, held)
+      commands = DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      baseline = DiscussionBridgeGhost::NativeBaselineJournal.new(context: context, journal: commands).current(@mapping.mapping_id)
+      original_baseline = @installation.operational_records.find_by!(kind: "native_managed_baseline", record_key: original_command).encrypted_payload
+    end
+    # The connector observes NONE of these policy changes or independent edits.
+    audited_field_control_policy!(authors: [], taxonomy: [])
+    field_control_edit!("authors", "9" * 24)
+    field_control_edit!("taxonomy", "8" * 24)
+    22.times do |index|
+      audited_field_control_policy!(authors: [(index.even? ? "1" : "2") * 24], taxonomy: ["4" * 24])
+    end
+    lease = nil
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations, key: "claim:offline-history")
+      held = authority(context, mutations, lease)
+      commands = DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      intake = DiscussionBridgeGhost::PolicyHistoryIntake.new(context: context, authority: held, baseline: baseline)
+      expect(intake.advance).to eq("complete" => false, "pages" => 1)
+      expect { intake.verify_next }.to raise_error(DiscussionBridgeGhost::Error)
+      expect { field_control_ownership(context, commands, held).capture }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(@installation.operational_records.where(kind: "policy_history_verified").count).to eq(0)
+    end
+    with_runtime do |context, mutations|
+      held = authority(context, mutations, lease)
+      commands = DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      intake = DiscussionBridgeGhost::PolicyHistoryIntake.new(context: context, authority: held, baseline: baseline)
+      expect(intake.advance).to eq("complete" => true, "pages" => 2)
+      expect(intake.verify_next).to eq("complete" => false, "pages" => 1)
+      expect { field_control_ownership(context, commands, held).capture }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+    with_runtime do |context, mutations|
+      held = authority(context, mutations, lease)
+      commands = DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      intake = DiscussionBridgeGhost::PolicyHistoryIntake.new(context: context, authority: held, baseline: baseline)
+      expect(intake.verify_next).to eq("complete" => true, "pages" => 2)
+      expect(intake.verify_next).to eq("complete" => true, "pages" => 2)
+      expect(baseline.released_relations(journal: commands, through_generation: lease.fetch("lease_generation")).sort).to eq(%w[authors taxonomy])
+      field_control_ownership(context, commands, held).capture
+      expect(@installation.operational_records.find_by!(kind: "native_managed_baseline", record_key: original_command).encrypted_payload).to eq(original_baseline)
+      expect(@installation.operational_records.where(kind: "policy_history_page").count).to eq(2)
+      expect(@installation.operational_records.where(kind: "policy_history_verified").count).to eq(1)
+      before = @field_control_native
+      @field_control_native = before.merge("title" => "An unrelated managed edit")
+      expect { field_control_ownership(context, commands, held).capture }.to raise_error(DiscussionBridgeGhost::Error)
+      @field_control_native = before
+      page = @installation.operational_records.where(kind: "policy_history_page").order(:id).first
+      original = page.encrypted_payload
+      payload = page.private_payload
+      payload.fetch("body").fetch("items").first["author_ids"] = ["7" * 24]
+      rewrite_record(page, payload)
+      expect { field_control_ownership(context, commands, held).capture }.to raise_error(DiscussionBridgeGhost::Error)
+      page.update!(encrypted_payload: original)
+      field_control_ownership(context, commands, held).capture
+    end
+    expect(a_request(:post, %r{/ghost/api/admin/posts/})).to have_been_made.once
+    expect(a_request(:put, %r{/ghost/api/admin/posts/})).to have_been_made.times(1)
+  end
+
+  it "does not turn an unrelated offline policy change into a field release" do
+    field_control_catalogs!
+    audited_field_control_policy!(authors: ["1" * 24], taxonomy: ["3" * 24])
+    baseline = nil
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations, key: "claim:history-no-release-base")
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held)
+      commands = DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      baseline = DiscussionBridgeGhost::NativeBaselineJournal.new(context: context, journal: commands).current(@mapping.mapping_id)
+    end
+    field_control_edit!("authors", "9" * 24)
+    audited_field_control_policy!(authors: ["2" * 24], taxonomy: ["3" * 24])
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations, key: "claim:history-no-release")
+      held = authority(context, mutations, lease)
+      commands = DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      intake = DiscussionBridgeGhost::PolicyHistoryIntake.new(context: context, authority: held, baseline: baseline)
+      expect(intake.advance).to eq("complete" => true, "pages" => 1)
+      expect(intake.verify_next).to eq("complete" => true, "pages" => 1)
+      expect(baseline.released_relations(journal: commands, through_generation: lease.fetch("lease_generation"))).to eq([])
+      expect { field_control_ownership(context, commands, held).capture }.to raise_error(DiscussionBridgeGhost::Error)
+      audited_field_control_policy!(authors: ["1" * 24], taxonomy: ["3" * 24])
+      expect { intake.advance }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+  end
+
+  def audited_field_control_policy!(authors:, taxonomy:)
+    config = @connection.reload.cms_configuration.deep_dup
+    expected = config.fetch("policy").delete("policy_revision")
+    config.fetch("policy").merge!("author_ids" => authors, "taxonomy_ids" => taxonomy)
+    DiscussionBridge::CmsAuthorityStore.new(@connection).configure!(actor: @admin,
+      input: { "expected_policy_revision" => expected, "configuration" => config })
+    @work = DiscussionBridge::CmsWorkCoordinator.new(@connection).enqueue!(@mapping,
+      source_snapshot: @snapshot, action: "publish_revision")
   end
 
   def field_control_policy!(authors:, taxonomy:, withdraw: false)

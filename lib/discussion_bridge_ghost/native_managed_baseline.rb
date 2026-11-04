@@ -4,6 +4,7 @@ require_relative "native_command_journal"
 require_relative "native_management"
 require_relative "native_owned_command"
 require_relative "native_field_control_journal"
+require_relative "policy_history_intake"
 
 module DiscussionBridgeGhost
   # A detached last-PROVEN managed state, derived only from the real journal's
@@ -84,7 +85,7 @@ module DiscussionBridgeGhost
                  value.dig("identity", "resource_id")
         raise Error.new("identity_conflict")
       end
-      NativeFieldControlJournal.new(
+      observed = NativeFieldControlJournal.new(
         context: journal.context
       ).released_relations(
         identity: value.fetch("identity"),
@@ -92,6 +93,13 @@ module DiscussionBridgeGhost
         through_generation: through_generation,
         before_record_id: before_record_id
       )
+      recovered = PolicyHistoryIntake.released_relations(
+        context: journal.context, identity: value.fetch("identity"),
+        after_revision: value.fetch("content_policy_revision"),
+        after_generation: command.dig("owner", "generation"),
+        through_generation: through_generation, before_record_id: before_record_id
+      )
+      (observed + recovered).uniq.freeze
     end
 
     # Pure comparison, not authority. Release facts passed here must originate

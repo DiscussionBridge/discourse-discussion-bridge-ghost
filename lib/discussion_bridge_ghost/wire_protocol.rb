@@ -11,9 +11,9 @@ module DiscussionBridgeGhost
   # No receiver model/store/coordinator is called from this facade.
   class WireProtocol
     NORMATIVE_SHA256 =
-      "808042688cbde88fac0acdf1187e4cb8c251e13025bfcf09cf3a3c361ca02003"
+      "98d7904e987fbe306a51632d1fb37d6f78564915d127145027b992ec9a2723dc"
     SCHEMA_SHA256 =
-      "e6a15a6d70f7bc8b8ee82aa22a0b9c2ff1bbf2da6277f7087118be9e026ce5c0"
+      "b6ab0efa3247f9c93a76ccb591a2ed9a5b0fd4805427f87e67c72a23b88edd0a"
     REQUEST_MAXIMUM = 65_536
     RESPONSE_MAXIMUM = 262_144
     JSON_MEDIA =
