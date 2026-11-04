@@ -913,12 +913,53 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         policy: @connection.reload.cms_configuration.fetch("policy"),
         stage: "publish"
       )
+    fields["tags"] = native.fetch("tags")
+    selected_authors = management.value.fetch("author_ids")
+    if selected_authors
+      fields["authors"] = selected_authors.map { |id| { "id" => id } }
+    end
+    selected_taxonomy = management.value.fetch("taxonomy_ids")
+    if selected_taxonomy
+      fields["tags"] = selected_taxonomy.map do |id|
+        { "id" => id, "name" => "Selected #{id}" }
+      end +
+        native
+          .fetch("tags")
+          .select { |tag| tag.fetch("name").start_with?("#discussionbridge-") }
+    end
     args[:baseline] = native
     args[:candidate] = native.merge(fields).merge(
       "management" => management.value
     )
     args[:request]["body_bytes"] = JSON.generate("posts" => [fields])
     args
+  end
+
+  it "obtains field releases from actual current V4 policy and rejects stale or wrong-stage descriptors" do
+    config = @connection.cms_configuration.deep_dup
+    config.fetch("policy")["author_ids"] = ["1" * 24]
+    @connection.update_columns(cms_configuration: config)
+    with_runtime do |context, mutations|
+      held = authority(context, mutations, claim(context, mutations))
+      current = held.native_management!(stage: "publish")
+      expect(current.released_relations).to eq(["taxonomy"])
+      expect(current.value.fetch("author_ids")).to eq(["1" * 24])
+      expect { held.native_management!(stage: "withdraw") }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      # Deliberately malformed synthetic configuration change without a new
+      # revision: comparing the full retained policy still catches the drift.
+      config.fetch("policy")["author_ids"] = []
+      config.fetch("policy")["taxonomy_ids"] = ["3" * 24]
+      @connection.update_columns(cms_configuration: config)
+      expect {
+        held.guard!(operation: :mutate, management: current)
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      released = held.native_management!(stage: "publish")
+      expect(released.released_relations).to eq(["authors"])
+      expect(current.value.fetch("author_ids")).to eq(["1" * 24])
+    end
+    expect(a_request(:any, /ghost-authority-/)).not_to have_been_made
   end
 
   it "executes a managed publish under real V4 authority, advances its head, and reaches the prewrite safeguard before rejecting an edited update" do
@@ -1141,6 +1182,31 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       expect { ownership.retained("0" * 64) }.to raise_error(
         DiscussionBridgeGhost::Error
       )
+
+      # Both fields are explicitly Ghost-controlled under this actual current
+      # empty policy. A new observation preserves their edits and the original
+      # immutable physical baseline/receipt; it is still not a policy ACK.
+      original_baseline_bytes = JSON.generate(head.value)
+      native =
+        native.merge(
+          "authors" => [{ "id" => "d" * 24 }],
+          "tags" =>
+            native.fetch("tags") +
+              [{ "id" => "e" * 24, "name" => "Ghost editorial tag" }],
+          "updated_at" => "2026-11-03T16:02:30.000Z"
+        )
+      after_edit = ownership.capture
+      expect(after_edit.key).not_to eq(observed.key)
+      expect(after_edit.value.dig("management", "policy_author_ids")).to eq([])
+      expect(after_edit.value.dig("management", "policy_taxonomy_ids")).to eq(
+        []
+      )
+      expect(after_edit.value.fetch("baseline_sha256")).to eq(head.sha256)
+      expect(JSON.generate(saved.current(@mapping.mapping_id).value)).to eq(
+        original_baseline_bytes
+      )
+      expect(receipt_row.reload.encrypted_payload).to eq(original_receipt_bytes)
+      kept_key, kept_receipt = after_edit.key, after_edit.receipt.sha256
 
       # Ghost has been edited before the next command was prepared. Even its
       # fresh CAS baseline already contains that change; it must not be blessed.

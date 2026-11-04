@@ -10,9 +10,10 @@ module DiscussionBridgeGhost
   class NativeManagement
     include ProtectedDiagnostics
 
-    FORMAT = "ghost-native-management-1"
+    LEGACY_FORMAT = "ghost-native-management-1"
+    FORMAT = "ghost-native-management-2"
     SCALARS = %w[title slug status visibility published_at].map(&:freeze).freeze
-    FIELDS = %w[
+    LEGACY_FIELDS = %w[
       format
       policy_revision
       stage
@@ -20,6 +21,8 @@ module DiscussionBridgeGhost
       author_ids
       taxonomy_ids
     ].sort.freeze
+    FIELDS =
+      (LEGACY_FIELDS + %w[policy_author_ids policy_taxonomy_ids]).sort.freeze
     STAGES = {
       "create_draft" => %w[title slug status visibility].freeze,
       "publish" => SCALARS,
@@ -34,10 +37,13 @@ module DiscussionBridgeGhost
 
     attr_reader :value
 
-    def self.for_policy(protocol:, policy:, stage:)
+    def self.for_policy(protocol:, policy:, stage:, format: FORMAT)
       raise Error.new("identity_conflict") unless protocol.is_a?(WireProtocol)
       protocol.validate!("Policy", policy)
       raise Error.new("identity_conflict") unless STAGES.key?(stage)
+      unless [LEGACY_FORMAT, FORMAT].include?(format)
+        raise Error.new("identity_conflict")
+      end
       authors =
         (
           if stage == "publish" && !policy.fetch("author_ids").empty?
@@ -54,17 +60,19 @@ module DiscussionBridgeGhost
             nil
           end
         )
-      new(
-        protocol: protocol,
-        value: {
-          "format" => FORMAT,
-          "policy_revision" => policy.fetch("policy_revision"),
-          "stage" => stage,
-          "scalar_fields" => STAGES.fetch(stage),
-          "author_ids" => authors,
-          "taxonomy_ids" => taxonomy
-        }
-      )
+      value = {
+        "format" => format,
+        "policy_revision" => policy.fetch("policy_revision"),
+        "stage" => stage,
+        "scalar_fields" => STAGES.fetch(stage),
+        "author_ids" => authors,
+        "taxonomy_ids" => taxonomy
+      }
+      if format == FORMAT
+        value["policy_author_ids"] = policy.fetch("author_ids")
+        value["policy_taxonomy_ids"] = policy.fetch("taxonomy_ids")
+      end
+      new(protocol: protocol, value: value)
     end
 
     def initialize(protocol:, value:)
@@ -75,8 +83,16 @@ module DiscussionBridgeGhost
           JSON.generate(value),
           maximum_bytes: WireProtocol::RESPONSE_MAXIMUM
         )
-      unless @value.is_a?(Hash) && @value.keys.sort == FIELDS &&
-               @value["format"] == FORMAT && STAGES.key?(@value["stage"]) &&
+      valid_format =
+        @value.is_a?(Hash) &&
+          (
+            (@value["format"] == FORMAT && @value.keys.sort == FIELDS) ||
+              (
+                @value["format"] == LEGACY_FORMAT &&
+                  @value.keys.sort == LEGACY_FIELDS
+              )
+          )
+      unless valid_format && STAGES.key?(@value["stage"]) &&
                @value["scalar_fields"] == STAGES.fetch(@value["stage"])
         raise Error.new("identity_conflict")
       end
@@ -93,6 +109,22 @@ module DiscussionBridgeGhost
            )
         raise Error.new("identity_conflict")
       end
+      if @value.fetch("format") == FORMAT
+        %w[author taxonomy].each do |relation|
+          selected = @value.fetch("policy_#{relation}_ids")
+          ids!(selected)
+          applied = @value.fetch("#{relation}_ids")
+          expected =
+            (
+              if @value.fetch("stage") == "publish" && !selected.empty?
+                selected
+              else
+                nil
+              end
+            )
+          raise Error.new("identity_conflict") unless applied == expected
+        end
+      end
       deep_freeze(@value)
       freeze
     rescue JSON::GeneratorError, KeyError, ArgumentError, TypeError
@@ -105,12 +137,30 @@ module DiscussionBridgeGhost
                .for_policy(
                  protocol: @protocol,
                  policy: policy,
-                 stage: @value.fetch("stage")
+                 stage: @value.fetch("stage"),
+                 format: @value.fetch("format")
                )
                .value == @value
         raise Error.new("work_authority_unavailable")
       end
       true
+    end
+
+    # Current policy can release each editorial field independently. Historical
+    # v1 draft/withdraw commands did not retain these selections: unknown is not
+    # permission to release a field retroactively. No native value is rewritten.
+    def released_relations
+      %w[authors taxonomy]
+        .select do |relation|
+          name = relation == "authors" ? "author" : "taxonomy"
+          if @value.fetch("format") == FORMAT
+            @value.fetch("policy_#{name}_ids").empty?
+          else
+            @value.fetch("stage") == "publish" &&
+              @value.fetch("#{name}_ids").nil?
+          end
+        end
+        .freeze
     end
 
     def validate_command!(command)

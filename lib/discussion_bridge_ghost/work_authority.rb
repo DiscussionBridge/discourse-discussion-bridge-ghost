@@ -46,6 +46,35 @@ module DiscussionBridgeGhost
       @initial_native_id
     end
 
+    # Obtain actual current policy, then independently recheck it together with
+    # the lease. The detached descriptor alone grants no native-write authority.
+    def native_management!(stage:)
+      expected =
+        (
+          if @identity.fetch("action") == "withdraw"
+            ["withdraw"]
+          else
+            %w[create_draft publish]
+          end
+        )
+      unless expected.include?(stage)
+        raise Error.new("work_authority_unavailable")
+      end
+      policy = read!("V4-01").fetch("policy")
+      management =
+        NativeManagement.for_policy(
+          protocol: @protocol,
+          policy: policy,
+          stage: stage
+        )
+      guard!(
+        operation: :mutate,
+        native_id: @initial_native_id,
+        management: management
+      )
+      management
+    end
+
     # Exact ordinary From intent, not a generic callback granting arbitrary
     # native writes. URL moves have additional authority and are refused here.
     def guard_native!(command)

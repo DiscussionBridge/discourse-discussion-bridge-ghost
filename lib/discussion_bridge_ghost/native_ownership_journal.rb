@@ -12,7 +12,7 @@ module DiscussionBridgeGhost
 
     ENTRY = "native_ownership_receipt"
     HEAD = "native_ownership_head"
-    FIELDS = %w[
+    LEGACY_FIELDS = %w[
       format
       binding
       work
@@ -22,6 +22,7 @@ module DiscussionBridgeGhost
       baseline_sha256
       native_revision
     ].sort.freeze
+    FIELDS = (LEGACY_FIELDS + %w[management]).sort.freeze
     HEAD_FIELDS = %w[
       format
       binding
@@ -68,20 +69,23 @@ module DiscussionBridgeGhost
       check!
       state = current_authority!
       mapping, work = state.values_at("mapping", "work")
+      @capture_management =
+        @authority.native_management!(
+          stage: work.fetch("action") == "withdraw" ? "withdraw" : "publish"
+        )
       baseline = @baselines.current(mapping.fetch("mapping_id"))
       unless baseline &&
                baseline.value.dig("management", "stage") != "create_draft"
         raise Error.new("identity_conflict")
       end
       identity = baseline.value.fetch("identity")
-      unless identity.slice("mapping_id", "resource_id", "external_id") ==
-               mapping.slice("mapping_id", "resource_id", "external_id") &&
-               (
-                 @authority.initial_native_id.nil? ||
-                   @authority.initial_native_id == identity.fetch("native_id")
-               )
-        raise Error.new("identity_conflict")
-      end
+      same_identity =
+        identity.slice("mapping_id", "resource_id", "external_id") ==
+          mapping.slice("mapping_id", "resource_id", "external_id")
+      same_native =
+        @authority.initial_native_id.nil? ||
+          @authority.initial_native_id == identity.fetch("native_id")
+      raise Error.new("identity_conflict") unless same_identity && same_native
       previous_head = checked_head(mapping.fetch("mapping_id"))
       command =
         @commands.retained(baseline.value.fetch("command_id")).fetch("command")
@@ -92,7 +96,7 @@ module DiscussionBridgeGhost
           kind: identity.fetch("kind"),
           maximum_bytes: maximum
         )
-      baseline.assert_current!(native)
+      baseline.assert_current!(native, management: @capture_management)
       matches =
         @client.find_by_resource(
           identity.fetch("resource_id"),
@@ -103,7 +107,7 @@ module DiscussionBridgeGhost
                matches.first["updated_at"] == native.fetch("updated_at")
         raise Error.new("identity_conflict")
       end
-      baseline.assert_current!(matches.first)
+      baseline.assert_current!(matches.first, management: @capture_management)
       native = matches.first
       @protocol.validate!("Revision", native.fetch("updated_at"))
       # If Ghost reports a canonical URL, it cannot silently replace the owned
@@ -140,14 +144,15 @@ module DiscussionBridgeGhost
         )
       value =
         snapshot(
-          "format" => "ghost-native-ownership-1",
+          "format" => "ghost-native-ownership-2",
           "binding" => @context.binding,
           "work" => work,
           "receipt" => receipt.value,
           "receipt_sha256" => receipt.sha256,
           "baseline_command_id" => baseline.value.fetch("command_id"),
           "baseline_sha256" => baseline.sha256,
-          "native_revision" => native.fetch("updated_at")
+          "native_revision" => native.fetch("updated_at"),
+          "management" => @capture_management.value
         )
       key = key_for(value)
       @context.commit do
@@ -181,6 +186,8 @@ module DiscussionBridgeGhost
       retained(key)
     rescue KeyError, ArgumentError, TypeError, JSON::GeneratorError
       raise Error.new("identity_conflict"), cause: nil
+    ensure
+      @capture_management = nil
     end
 
     # Historical data only: reading a retained receipt grants no permission and
@@ -195,9 +202,20 @@ module DiscussionBridgeGhost
     def retained(key)
       check!
       value = payload(ENTRY, key)
-      unless value.is_a?(Hash) && value.keys.sort == FIELDS &&
-               value["format"] == "ghost-native-ownership-1" &&
-               value["binding"] == @context.binding && key_for(value) == key
+      valid_format =
+        value.is_a?(Hash) &&
+          (
+            (
+              value["format"] == "ghost-native-ownership-1" &&
+                value.keys.sort == LEGACY_FIELDS
+            ) ||
+              (
+                value["format"] == "ghost-native-ownership-2" &&
+                  value.keys.sort == FIELDS
+              )
+          )
+      unless valid_format && value["binding"] == @context.binding &&
+               key_for(value) == key
         raise Error.new("identity_conflict")
       end
       @protocol.validate!("Revision", value.fetch("native_revision"))
@@ -205,6 +223,20 @@ module DiscussionBridgeGhost
         OwnershipReceipt.new(value.fetch("receipt"), protocol: @protocol)
       work = value.fetch("work")
       @protocol.validate!("Work", work)
+      if value.fetch("format") == "ghost-native-ownership-2"
+        management =
+          NativeManagement.new(
+            protocol: @protocol,
+            value: value.fetch("management")
+          )
+        expected_stage =
+          work.fetch("action") == "withdraw" ? "withdraw" : "publish"
+        unless management.value.fetch("policy_revision") ==
+                 work.fetch("policy_revision") &&
+                 management.value.fetch("stage") == expected_stage
+          raise Error.new("identity_conflict")
+        end
+      end
       baseline = @baselines.retained(value.fetch("baseline_command_id"))
       identity = baseline.value.fetch("identity")
       unless receipt.sha256 == value.fetch("receipt_sha256") &&
@@ -253,7 +285,8 @@ module DiscussionBridgeGhost
     def current_authority!
       @authority.guard!(
         operation: :mutate,
-        native_id: @authority.initial_native_id
+        native_id: @authority.initial_native_id,
+        management: @capture_management
       )
     end
 

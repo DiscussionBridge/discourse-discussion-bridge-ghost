@@ -200,6 +200,47 @@ RSpec.describe DiscussionBridgeGhost::NativeManagement do
     )
   end
 
+  it "retains independent field releases in every new stage without changing historical v1 descriptors" do
+    policy["author_ids"] = [author_a]
+    policy["taxonomy_ids"] = [tag_x]
+    %w[create_draft publish withdraw].each do |stage|
+      expect(intent(stage).released_relations).to eq([])
+      authors_released = intent(stage, policy.merge("author_ids" => []))
+      tags_released = intent(stage, policy.merge("taxonomy_ids" => []))
+      expect(authors_released.released_relations).to eq(["authors"])
+      expect(tags_released.released_relations).to eq(["taxonomy"])
+      expect(authors_released.value.fetch("policy_taxonomy_ids")).to eq([tag_x])
+      expect(tags_released.value.fetch("policy_author_ids")).to eq([author_a])
+      legacy =
+        described_class.for_policy(
+          protocol: protocol,
+          policy: policy,
+          stage: stage,
+          format: described_class::LEGACY_FORMAT
+        )
+      bytes = JSON.generate(legacy.value)
+      restored = described_class.new(protocol: protocol, value: legacy.value)
+      expect(restored.assert_policy!(policy)).to eq(true)
+      expect(JSON.generate(restored.value)).to eq(bytes)
+      expect(restored.value).not_to have_key("policy_author_ids")
+      expect(restored.released_relations).to eq([])
+    end
+    %w[create_draft withdraw].each do |stage|
+      unknown =
+        described_class.for_policy(
+          protocol: protocol,
+          policy: policy.merge("author_ids" => [], "taxonomy_ids" => []),
+          stage: stage,
+          format: described_class::LEGACY_FORMAT
+        )
+      expect(unknown.released_relations).to eq([])
+    end
+    released = intent("withdraw", policy.merge("author_ids" => []))
+    expect { released.assert_policy!(policy) }.to raise_error(
+      DiscussionBridgeGhost::Error
+    )
+  end
+
   it "retains explicit whole taxonomy selection semantics rather than inventing membership-only ownership" do
     policy["taxonomy_ids"] = [tag_y]
     management = intent

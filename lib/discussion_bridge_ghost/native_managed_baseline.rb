@@ -35,7 +35,11 @@ module DiscussionBridgeGhost
       raise Error.new("identity_conflict"), cause: nil
     end
 
-    def assert_current!(native)
+    def assert_current!(native, management: nil)
+      unless management.nil? || management.is_a?(NativeManagement)
+        raise Error.new("identity_conflict")
+      end
+      released = management ? management.released_relations : []
       current = snapshot(native)
       identity = @value.fetch("identity")
       unless current["id"] == identity.fetch("native_id") &&
@@ -56,7 +60,7 @@ module DiscussionBridgeGhost
         end
       %w[authors taxonomy].each do |relation|
         expected = @value.fetch(relation)
-        next if expected.nil?
+        next if expected.nil? || released.include?(relation)
         actual =
           if relation == "authors"
             relation_ids(current.fetch("authors"))
@@ -100,7 +104,10 @@ module DiscussionBridgeGhost
                  previous.value.fetch("identity") == @identity
           raise Error.new("identity_conflict")
         end
-        previous.assert_current!(command.fetch("baseline"))
+        previous.assert_current!(
+          command.fetch("baseline"),
+          management: management
+        )
       end
       fragment = fragment_state(native)
       NativeOwnedCommand.new(
@@ -147,7 +154,11 @@ module DiscussionBridgeGhost
           authors:
             (
               if prior_profile
-                previous.value.fetch("authors")
+                if management.released_relations.include?("authors")
+                  nil
+                else
+                  previous.value.fetch("authors")
+                end
               else
                 management.value.fetch("author_ids")
               end
@@ -155,7 +166,11 @@ module DiscussionBridgeGhost
           taxonomy:
             (
               if prior_profile
-                previous.value.fetch("taxonomy")
+                if management.released_relations.include?("taxonomy")
+                  nil
+                else
+                  previous.value.fetch("taxonomy")
+                end
               else
                 management.value.fetch("taxonomy_ids")
               end
@@ -183,6 +198,7 @@ module DiscussionBridgeGhost
       completion:,
       content_command:,
       content_completion:,
+      previous_value:,
       value:
     )
       restored = allocate
@@ -193,6 +209,7 @@ module DiscussionBridgeGhost
         completion: completion,
         content_command: content_command,
         content_completion: content_completion,
+        previous_value: previous_value,
         value: value
       )
       restored
@@ -205,6 +222,7 @@ module DiscussionBridgeGhost
       completion:,
       content_command:,
       content_completion:,
+      previous_value:,
       value:
     )
       @maximum = command.dig("request", "maximum_bytes")
@@ -241,6 +259,15 @@ module DiscussionBridgeGhost
         raise Error.new("identity_conflict")
       end
       withdrawal = management.value.fetch("stage") == "withdraw"
+      if withdrawal
+        unless previous_value.is_a?(Hash) &&
+                 previous_value.fetch("binding") == command.fetch("binding") &&
+                 previous_value.fetch("identity") == @identity &&
+                 Digest::SHA256.hexdigest(JSON.generate(previous_value)) ==
+                   value.fetch("previous_sha256")
+          raise Error.new("identity_conflict")
+        end
+      end
       same_effect =
         content_command == command && content_completion == completion
       raise Error.new("identity_conflict") unless withdrawal || same_effect
@@ -272,8 +299,31 @@ module DiscussionBridgeGhost
           content_policy_revision:
             content_management.value.fetch("policy_revision"),
           scalars: scalars,
-          authors: content_management.value.fetch("author_ids"),
-          taxonomy: content_management.value.fetch("taxonomy_ids")
+          authors:
+            (
+              if withdrawal && management.released_relations.include?("authors")
+                nil
+              else
+                if withdrawal
+                  previous_value.fetch("authors")
+                else
+                  content_management.value.fetch("author_ids")
+                end
+              end
+            ),
+          taxonomy:
+            (
+              if withdrawal &&
+                   management.released_relations.include?("taxonomy")
+                nil
+              else
+                if withdrawal
+                  previous_value.fetch("taxonomy")
+                else
+                  content_management.value.fetch("taxonomy_ids")
+                end
+              end
+            )
         )
       same_fragment = !withdrawal || fragment == fragment_state(content_native)
       unless @value == value && same_fragment

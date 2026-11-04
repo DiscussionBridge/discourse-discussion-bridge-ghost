@@ -703,6 +703,163 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
     end
   end
 
+  %w[authors taxonomy].each do |released_field|
+    it "releases #{released_field} independently, preserves Ghost edits and historical proof, and manages explicit re-selection again" do
+      with_journal do |journal, context|
+        first = managed_arguments(context)
+        draft, native = managed_completion(journal, context, first)
+        selected =
+          first
+            .fetch(:candidate)
+            .fetch("management")
+            .slice("policy_revision")
+            .merge(
+              "enabled" => true,
+              "selection" => "all_public",
+              "category_ids" => [],
+              "include_topic_ids" => [],
+              "exclude_topic_ids" => [],
+              "include_unlisted" => false,
+              "publication_kind" => "dynamic",
+              "presentation_mode" => "full",
+              "author_ids" => ["1" * 24],
+              "taxonomy_ids" => ["3" * 24]
+            )
+        initial =
+          managed_arguments(
+            context,
+            stage: "publish",
+            previous: native,
+            first: first,
+            policy: selected
+          )
+        published, current =
+          managed_completion(journal, context, initial, previous: draft)
+        prior_bytes = JSON.generate(published.value)
+        original_completion = journal.retained(initial.fetch(:command_id))
+        edited = Marshal.load(Marshal.dump(current))
+        if released_field == "authors"
+          edited["authors"] = [{ "id" => "5" * 24 }]
+        else
+          edited["tags"] = edited
+            .fetch("tags")
+            .reject { |tag| tag.fetch("id") == "3" * 24 } +
+            [{ "id" => "6" * 24, "name" => "Ghost editorial replacement" }]
+        end
+        edited["updated_at"] = "2026-11-04T01:00:00.000Z"
+        expect { published.assert_current!(edited) }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+        selection = released_field == "authors" ? "author_ids" : "taxonomy_ids"
+        cleared =
+          selected.merge(
+            "policy_revision" => SecureRandom.uuid,
+            selection => []
+          )
+        release_args =
+          managed_arguments(
+            context,
+            stage: "publish",
+            previous: edited,
+            first: first,
+            policy: cleared
+          )
+        release_command = journal.prepare(**release_args)
+        guard =
+          DiscussionBridgeGhost::NativeBaselineJournal.new(
+            context: context,
+            journal: journal
+          )
+        expect(
+          guard.assert_before_write!(release_command, native: edited)
+        ).to eq(true)
+        other_edit = Marshal.load(Marshal.dump(edited))
+        if released_field == "authors"
+          other_edit["tags"] << {
+            "id" => "9" * 24,
+            "name" => "Still-managed taxonomy edit"
+          }
+        else
+          other_edit["authors"] = [{ "id" => "9" * 24 }]
+        end
+        expect {
+          guard.assert_before_write!(release_command, native: other_edit)
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        released, latest =
+          managed_completion(
+            journal,
+            context,
+            release_args,
+            previous: published
+          )
+        expect(released.value.fetch(released_field)).to eq(nil)
+        other = released_field == "authors" ? "taxonomy" : "authors"
+        expect(released.value.fetch(other)).to eq(published.value.fetch(other))
+        native_key = released_field == "authors" ? "authors" : "tags"
+        expect(latest.fetch(native_key)).to eq(edited.fetch(native_key))
+        expect(JSON.generate(published.value)).to eq(prior_bytes)
+        expect(journal.retained(initial.fetch(:command_id))).to eq(
+          original_completion
+        )
+        changed_again = Marshal.load(Marshal.dump(latest))
+        if released_field == "authors"
+          changed_again["authors"] = [{ "id" => "7" * 24 }]
+        else
+          changed_again["tags"] = changed_again
+            .fetch("tags")
+            .reject { |tag| tag.fetch("id") == "6" * 24 } +
+            [{ "id" => "8" * 24, "name" => "Ghost later editorial tag" }]
+        end
+        expect(released.assert_current!(changed_again)).to eq(true)
+        expect {
+          released.assert_current!(
+            changed_again.merge("title" => "Edited managed title")
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        missing_marker =
+          changed_again
+            .fetch("tags")
+            .reject do |tag|
+              tag.fetch("name").start_with?("#discussionbridge-resource-")
+            end
+        expect {
+          released.assert_current!(
+            changed_again.merge("tags" => missing_marker)
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        reselected = selected.merge("policy_revision" => SecureRandom.uuid)
+        args =
+          managed_arguments(
+            context,
+            stage: "publish",
+            previous: changed_again,
+            first: first,
+            policy: reselected
+          )
+        managed_again, final =
+          managed_completion(journal, context, args, previous: released)
+        expect(managed_again.value.fetch(released_field)).to eq(
+          published.value.fetch(released_field)
+        )
+        expect(managed_again.assert_current!(final)).to eq(true)
+        expect { managed_again.assert_current!(changed_again) }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+        saved =
+          DiscussionBridgeGhost::NativeBaselineJournal.new(
+            context: context,
+            journal: journal
+          )
+        expect(saved.retained(release_args.fetch(:command_id)).value).to eq(
+          released.value
+        )
+        expect(saved.current(first.dig(:owner, "mapping_id")).value).to eq(
+          managed_again.value
+        )
+      end
+    end
+  end
+
   it "carries the last proven article and metadata profile across status-only withdrawal" do
     with_journal do |journal, context|
       first = managed_arguments(context)
@@ -746,6 +903,97 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
           final.merge("title" => "Edited while withdrawn")
         )
       }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+  end
+
+  it "retains independent releases across repeated status-only withdrawal and restart" do
+    mapping_id = expected = nil
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      draft, native = managed_completion(journal, context, first)
+      selected = {
+        "policy_revision" => SecureRandom.uuid,
+        "enabled" => true,
+        "selection" => "all_public",
+        "category_ids" => [],
+        "include_topic_ids" => [],
+        "exclude_topic_ids" => [],
+        "include_unlisted" => false,
+        "publication_kind" => "dynamic",
+        "presentation_mode" => "full",
+        "author_ids" => ["1" * 24],
+        "taxonomy_ids" => ["3" * 24]
+      }
+      args =
+        managed_arguments(
+          context,
+          stage: "publish",
+          previous: native,
+          first: first,
+          policy: selected
+        )
+      previous, current =
+        managed_completion(journal, context, args, previous: draft)
+      content_command_id = args.fetch(:command_id)
+      %w[author_ids taxonomy_ids].each do |selection|
+        selected =
+          selected.merge(
+            "policy_revision" => SecureRandom.uuid,
+            selection => []
+          )
+        if selection == "author_ids"
+          current = current.merge("authors" => [{ "id" => "7" * 24 }])
+        else
+          current =
+            current.merge(
+              "tags" =>
+                current
+                  .fetch("tags")
+                  .reject { |tag| tag.fetch("id") == "3" * 24 } +
+                  [{ "id" => "8" * 24, "name" => "Ghost-owned tag" }]
+            )
+        end
+        withdrawal =
+          managed_arguments(
+            context,
+            stage: "withdraw",
+            previous: current,
+            first: first,
+            policy: selected
+          )
+        previous, current =
+          managed_completion(journal, context, withdrawal, previous: previous)
+      end
+      # Re-selection alone has not physically assigned metadata in a status-only
+      # command. Only a later publish can establish a managed assignment again.
+      selected =
+        selected.merge(
+          "policy_revision" => SecureRandom.uuid,
+          "author_ids" => ["1" * 24]
+        )
+      withdrawal =
+        managed_arguments(
+          context,
+          stage: "withdraw",
+          previous: current,
+          first: first,
+          policy: selected
+        )
+      previous, current =
+        managed_completion(journal, context, withdrawal, previous: previous)
+      expect(previous.value.fetch("authors")).to eq(nil)
+      expect(previous.value.fetch("taxonomy")).to eq(nil)
+      expect(previous.value.fetch("content_command_id")).to eq(
+        content_command_id
+      )
+      expect(previous.assert_current!(current)).to eq(true)
+      mapping_id = first.dig(:owner, "mapping_id")
+      expected = previous.value
+    end
+    with_journal do |journal, context|
+      expect(
+        baseline_journal(journal, context).current(mapping_id).value
+      ).to eq(expected)
     end
   end
 

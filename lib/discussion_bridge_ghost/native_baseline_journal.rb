@@ -129,8 +129,17 @@ module DiscussionBridgeGhost
                    identity_for(command, native.fetch("id"))
           raise Error.new("identity_conflict")
         end
-        previous.assert_current!(command.fetch("baseline"))
-        previous.assert_current!(native)
+        management =
+          NativeManagement.new(
+            protocol: @context.protocol,
+            value: command.fetch("candidate").fetch("management")
+          )
+        management.validate_command!(command)
+        previous.assert_current!(
+          command.fetch("baseline"),
+          management: management
+        )
+        previous.assert_current!(native, management: management)
       end
       @context.assert!
       true
@@ -273,6 +282,22 @@ module DiscussionBridgeGhost
 
     def project_entry(entry)
       latest = completed(entry.fetch("command_id"))
+      previous_value = nil
+      if latest.dig("command", "owner", "action") == "withdraw"
+        # A prior release can survive more than one status-only command. Read
+        # its authenticated predecessor projection, not today's selection and
+        # not a recursive traversal of every historical article revision.
+        predecessor = read_entry(entry.fetch("previous_command_id"))
+        unless predecessor.fetch("root_command_id") ==
+                 entry.fetch("root_command_id") &&
+                 predecessor.fetch("mapping_id") == entry.fetch("mapping_id") &&
+                 predecessor.fetch("sequence") + 1 == entry.fetch("sequence") &&
+                 predecessor.fetch("baseline_sha256") ==
+                   entry.dig("baseline", "previous_sha256")
+          raise Error.new("identity_conflict")
+        end
+        previous_value = predecessor.fetch("baseline")
+      end
       content_id = entry.fetch("baseline").fetch("content_command_id")
       if content_id == entry.fetch("command_id")
         content = latest
@@ -294,6 +319,7 @@ module DiscussionBridgeGhost
         completion: latest.dig("state", "completion"),
         content_command: content.fetch("command"),
         content_completion: content.dig("state", "completion"),
+        previous_value: previous_value,
         value: entry.fetch("baseline")
       )
     end
