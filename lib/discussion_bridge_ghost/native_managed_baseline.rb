@@ -241,10 +241,9 @@ module DiscussionBridgeGhost
         raise Error.new("identity_conflict")
       end
       withdrawal = management.value.fetch("stage") == "withdraw"
-      unless withdrawal ||
-               (content_command == command && content_completion == completion)
-        raise Error.new("identity_conflict")
-      end
+      same_effect =
+        content_command == command && content_completion == completion
+      raise Error.new("identity_conflict") unless withdrawal || same_effect
       native = snapshot(completion.fetch("native"))
       content_native = snapshot(content_completion.fetch("native"))
       fragment = fragment_state(native)
@@ -276,8 +275,8 @@ module DiscussionBridgeGhost
           authors: content_management.value.fetch("author_ids"),
           taxonomy: content_management.value.fetch("taxonomy_ids")
         )
-      unless @value == value &&
-               (!withdrawal || fragment == fragment_state(content_native))
+      same_fragment = !withdrawal || fragment == fragment_state(content_native)
+      unless @value == value && same_fragment
         raise Error.new("identity_conflict")
       end
       finish!(native)
