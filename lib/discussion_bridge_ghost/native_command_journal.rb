@@ -292,21 +292,6 @@ module DiscussionBridgeGhost
       snapshot("command" => command, "state" => state, "response" => response)
     end
 
-    # Immutable local causal boundary, not a timestamp, wire ID or grant.
-    # Commands and policy observations share this database sequence while the
-    # actual native-target lock serializes their creation. Later observations
-    # must not change the original intent's historical reconstruction.
-    def preparation_record_id(command_id)
-      assert_effect_context!
-      original = retained(command_id).fetch("command")
-      saved = record("native_command", command_id)
-      unless saved && saved.id.is_a?(Integer) && saved.id.positive? &&
-               saved.private_payload == original
-        raise Error.new("identity_conflict")
-      end
-      saved.id
-    end
-
     # Retire only an intent whose complete original history proves no pending
     # dispatch. A genuine retained not_sent outcome clears the pending attempt;
     # an exception, missing reply or equal native content does not. This is a

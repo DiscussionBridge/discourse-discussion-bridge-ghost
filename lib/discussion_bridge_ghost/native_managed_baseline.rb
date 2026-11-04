@@ -16,7 +16,12 @@ module DiscussionBridgeGhost
 
     attr_reader :value, :sha256
 
-    def self.from_completed(journal:, command_id:, previous: nil)
+    def self.from_completed(
+      journal:,
+      command_id:,
+      previous: nil,
+      before_record_id: nil
+    )
       unless journal.is_a?(NativeCommandJournal)
         raise Error.new("identity_conflict")
       end
@@ -37,7 +42,7 @@ module DiscussionBridgeGhost
               previous.released_relations(
                 journal: journal,
                 through_generation: command.dig("owner", "generation"),
-                before_command_id: command.fetch("command_id")
+                before_record_id: before_record_id
               )
             else
               []
@@ -48,16 +53,12 @@ module DiscussionBridgeGhost
       raise Error.new("identity_conflict"), cause: nil
     end
 
-    def released_relations(
-      journal:,
-      through_generation:,
-      before_command_id: nil
-    )
+    def released_relations(journal:, through_generation:, before_record_id: nil)
       self.class.release_history(
         journal: journal,
         value: @value,
         through_generation: through_generation,
-        before_command_id: before_command_id
+        before_record_id: before_record_id
       )
     end
 
@@ -67,7 +68,7 @@ module DiscussionBridgeGhost
       journal:,
       value:,
       through_generation:,
-      before_command_id: nil
+      before_record_id: nil
     )
       unless journal.is_a?(NativeCommandJournal) &&
                journal.context.binding == value.fetch("binding")
@@ -83,26 +84,13 @@ module DiscussionBridgeGhost
                  value.dig("identity", "resource_id")
         raise Error.new("identity_conflict")
       end
-      cutoff = nil
-      if before_command_id
-        intent = journal.retained(before_command_id).fetch("command")
-        unless intent.fetch("binding") == value.fetch("binding") &&
-                 intent.dig("owner", "mapping_id") ==
-                   value.dig("identity", "mapping_id") &&
-                 intent.dig("identity", "resource_id") ==
-                   value.dig("identity", "resource_id") &&
-                 intent.dig("owner", "generation") == through_generation
-          raise Error.new("identity_conflict")
-        end
-        cutoff = journal.preparation_record_id(before_command_id)
-      end
       NativeFieldControlJournal.new(
         context: journal.context
       ).released_relations(
         identity: value.fetch("identity"),
         after_generation: command.dig("owner", "generation"),
         through_generation: through_generation,
-        before_record_id: cutoff
+        before_record_id: before_record_id
       )
     end
 

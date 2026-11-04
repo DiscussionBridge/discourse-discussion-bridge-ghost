@@ -138,8 +138,7 @@ module DiscussionBridgeGhost
         released =
           previous.released_relations(
             journal: @commands,
-            through_generation: command.dig("owner", "generation"),
-            before_command_id: command.fetch("command_id")
+            through_generation: command.dig("owner", "generation")
           )
         previous.assert_current!(
           command.fetch("baseline"),
@@ -283,7 +282,8 @@ module DiscussionBridgeGhost
         NativeManagedBaseline.from_completed(
           journal: @commands,
           command_id: entry.fetch("command_id"),
-          previous: prior
+          previous: prior,
+          before_record_id: enrollment_record_id(entry)
         )
       raise Error.new("identity_conflict") unless rebuilt.value == current.value
       current
@@ -339,7 +339,7 @@ module DiscussionBridgeGhost
                 value: previous_value,
                 through_generation:
                   latest.dig("command", "owner", "generation"),
-                before_command_id: latest.dig("command", "command_id")
+                before_record_id: enrollment_record_id(entry)
               )
             else
               []
@@ -347,6 +347,20 @@ module DiscussionBridgeGhost
           ),
         value: entry.fetch("baseline")
       )
+    end
+
+    # Immutable causal boundary for this exact enrolled projection, not today's
+    # policy or a caller-selected wall clock. Native-target exclusion serializes
+    # release observations and enrollment. This preserves legacy projections
+    # even when a valid observation followed preparation but preceded enrollment.
+    def enrollment_record_id(entry)
+      saved = row(ENTRY, entry.fetch("command_id"))
+      unless saved && saved.id.is_a?(Integer) && saved.id.positive? &&
+               saved.mapping_public_id == entry.fetch("mapping_id") &&
+               saved.private_payload == entry
+        raise Error.new("identity_conflict")
+      end
+      saved.id
     end
 
     def completed(command_id)

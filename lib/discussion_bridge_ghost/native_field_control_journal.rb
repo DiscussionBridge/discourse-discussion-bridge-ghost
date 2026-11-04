@@ -109,7 +109,7 @@ module DiscussionBridgeGhost
     # Historical facts only. Both ends are exact generations supplied by the
     # genuine content command and current command/work, not today's policy.
     # Fixed-width counter keys permit two indexed range lookups. Historical
-    # reconstruction additionally uses the original command preparation row;
+    # reconstruction additionally uses the original baseline enrollment row;
     # current comparisons may include later observations in that generation.
     def released_relations(
       identity:,
