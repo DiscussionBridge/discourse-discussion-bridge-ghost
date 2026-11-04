@@ -108,6 +108,51 @@ module DiscussionBridgeGhost
       }
     end
 
+    # One bounded slice of the operator's selected native IDs, not a crawl of
+    # the complete catalog. A coordinator may stage larger selections in
+    # successive slices. Returned labels are metadata, NOT current authority or
+    # an instruction to change a post. The bound HTTP guard still runs for this
+    # exact read and no private staff fields leave the projection.
+    def selected_metadata(kind, ids:, maximum_bytes: 262_144)
+      unless %w[authors taxonomy].include?(kind) && ids.is_a?(Array) &&
+               ids.length <= 100 && ids.uniq == ids &&
+               ids.all? { |id|
+                 id.is_a?(String) && /\A[a-f0-9]{24}\z/.match?(id)
+               }
+        raise Error.new("configuration_invalid")
+      end
+      return [] if ids.empty?
+
+      resource = kind == "authors" ? "users" : "tags"
+      fields = kind == "authors" ? %w[id name status] : %w[id name slug]
+      filter = CGI.escape("id:[#{ids.join(",")}]")
+      data =
+        read(
+          "/ghost/api/admin/#{resource}/?filter=#{filter}&limit=#{ids.length}&page=1&fields=#{CGI.escape(fields.join(","))}",
+          maximum_bytes
+        )
+      items = data[resource]
+      pagination = data.dig("meta", "pagination") if data["meta"].is_a?(Hash)
+      unless items.is_a?(Array) && items.length == ids.length &&
+               pagination.is_a?(Hash) && pagination["page"].is_a?(Integer) &&
+               pagination["page"] == 1 && pagination["total"].is_a?(Integer) &&
+               pagination["total"] == ids.length && pagination.key?("next") &&
+               pagination["next"].nil? &&
+               items.all? { |item|
+                 item.is_a?(Hash) && item["id"].is_a?(String) &&
+                   /\A[a-f0-9]{24}\z/.match?(item["id"]) &&
+                   item["name"].is_a?(String) && item[fields.last].is_a?(String)
+               }
+        raise Error.new("response_invalid")
+      end
+      by_id = items.to_h { |item| [item.fetch("id"), item] }
+      unless by_id.keys.sort == ids.sort && by_id.length == items.length
+        raise Error.new("identity_conflict")
+      end
+      # Native sort order must not change the selected primary author/tag.
+      ids.map { |id| by_id.fetch(id).slice(*fields) }
+    end
+
     private
 
     def lookup(filter, maximum_bytes, limit)

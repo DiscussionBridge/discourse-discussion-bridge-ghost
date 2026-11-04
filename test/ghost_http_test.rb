@@ -114,6 +114,106 @@ class GhostNativeHttpTest < Minitest::Test
     refute_includes http.inspect, KEY
   end
 
+  def selected_metadata(kind, ids, items, pagination = nil)
+    resource = kind == "authors" ? "users" : "tags"
+    payload = {
+      resource => items,
+      "meta" => {
+        "pagination" =>
+          pagination || { "page" => 1, "total" => items.length, "next" => nil }
+      }
+    }
+    DiscussionBridgeGhost::GhostAdminClient.new(
+      http: transport(Incoming.new(200, JSON.generate(payload)))
+    ).selected_metadata(kind, ids: ids)
+  end
+
+  def test_selected_metadata_is_one_filtered_authenticated_read_in_selection_order
+    %w[authors taxonomy].each do |kind|
+      result =
+        selected_metadata(
+          kind,
+          [ID, OTHER_ID],
+          [
+            {
+              "id" => OTHER_ID,
+              "name" => "Second",
+              "status" => "active",
+              "slug" => "second",
+              "email" => "private@example.invalid"
+            },
+            {
+              "id" => ID,
+              "name" => "First",
+              "status" => "active",
+              "slug" => "first",
+              "email" => "private@example.invalid"
+            }
+          ]
+        )
+      assert_equal [ID, OTHER_ID], result.map { |item| item.fetch("id") }
+      assert_equal %w[First Second], result.map { |item| item.fetch("name") }
+      expected_fields =
+        kind == "authors" ? %w[id name status] : %w[id name slug]
+      assert result.all? { |item| item.keys.sort == expected_fields.sort }
+      refute_includes result.inspect, "private@example.invalid"
+      assert_equal 1, @connection.requests.length
+      request = @connection.requests.first
+      query = CGI.parse(URI.parse(request.path).query)
+      assert_equal ["id:[#{ID},#{OTHER_ID}]"], query.fetch("filter")
+      assert_equal ["2"], query.fetch("limit")
+      assert_equal ["1"], query.fetch("page")
+      assert_equal [expected_fields.join(",")], query.fetch("fields")
+      assert request["Authorization"].start_with?("Ghost ")
+      assert_nil request["Cookie"]
+    end
+  end
+
+  def test_selected_metadata_refuses_missing_extra_duplicate_or_foreign_ids
+    base = { "id" => ID, "name" => "Selected", "status" => "active" }
+    [[], [base, base], [base.merge("id" => OTHER_ID)]].each do |items|
+      assert_raises(DiscussionBridgeGhost::Error) do
+        selected_metadata("authors", [ID], items)
+      end
+    end
+    [
+      { "page" => 2, "total" => 1, "next" => nil },
+      { "page" => 1, "total" => 2, "next" => 2 },
+      { "page" => 1, "total" => 1 },
+      { "page" => 1, "total" => 1.0, "next" => nil }
+    ].each do |pagination|
+      # Native pagination facts must be integers, not floating-point aliases.
+      assert_raises(DiscussionBridgeGhost::Error) do
+        selected_metadata("authors", [ID], [base], pagination)
+      end
+    end
+    %w[id name status].each do |field|
+      assert_raises(DiscussionBridgeGhost::Error) do
+        selected_metadata("authors", [ID], [base.except(field)])
+      end
+    end
+  end
+
+  def test_selected_metadata_empty_selection_does_not_query_and_invalid_ids_never_dispatch
+    client =
+      DiscussionBridgeGhost::GhostAdminClient.new(http: transport(Incoming.new))
+    assert_equal [], client.selected_metadata("authors", ids: [])
+    [
+      nil,
+      ["../private"],
+      [ID, ID],
+      Array.new(101) { |i| "%024x" % i }
+    ].each do |ids|
+      assert_raises(DiscussionBridgeGhost::Error) do
+        client.selected_metadata("authors", ids: ids)
+      end
+    end
+    assert_raises(DiscussionBridgeGhost::Error) do
+      client.selected_metadata("private-users", ids: [ID])
+    end
+    assert_empty @connection.requests
+  end
+
   def dispatch_identity
     {
       "command_id" => RESOURCE,
