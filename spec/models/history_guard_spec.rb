@@ -88,13 +88,23 @@ RSpec.describe DiscussionBridgeGhost::HistoryGuard do
     key = "#{SecureRandom.uuid}:#{"a" * 64}:0000000000000001"
     record = page(owner, "#{key}:0000000000000001")
     connection = owner.class.connection
+    raw = connection.raw_connection
     connection.cache do
       previous = token(owner, key)
+      cached =
+        described_class.where(
+          installation_id: owner.id,
+          guard_key: "pages:#{key}"
+        )
+      expect(cached.pick(:revision)).to eq(previous)
       # Raw PostgreSQL intentionally bypasses Active Record cache invalidation,
       # as another process's write would; the real database trigger still runs.
-      connection.raw_connection.exec(
+      raw.exec(
         "UPDATE discussion_bridge_ghost_records SET encrypted_payload = 'outside-cache' WHERE id = #{record.id}"
       )
+      # Establish the stale-cache prerequisite; a fresh sentinel read must not
+      # accidentally pass this test because the driver cleared the cache.
+      expect(cached.pick(:revision)).to eq(previous)
       expect(token(owner, key)).not_to eq(previous)
     end
   end
