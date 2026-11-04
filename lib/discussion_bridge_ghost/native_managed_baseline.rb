@@ -189,7 +189,7 @@ module DiscussionBridgeGhost
       section = root.at_css("section[data-discussionbridge-owned]")
       raise Error.new("native_fragment_invalid") unless section
       native_id = section["data-discussionbridge-native-id"]
-      unless ["pending", @identity.fetch("native_id")].include?(native_id)
+      if ["pending", @identity.fetch("native_id")].exclude?(native_id)
         raise Error.new("identity_conflict")
       end
       parser =
