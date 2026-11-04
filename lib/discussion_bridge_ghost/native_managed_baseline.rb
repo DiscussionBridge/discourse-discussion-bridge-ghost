@@ -85,20 +85,24 @@ module DiscussionBridgeGhost
                  value.dig("identity", "resource_id")
         raise Error.new("identity_conflict")
       end
-      observed = NativeFieldControlJournal.new(
-        context: journal.context
-      ).released_relations(
-        identity: value.fetch("identity"),
-        after_generation: command.dig("owner", "generation"),
-        through_generation: through_generation,
-        before_record_id: before_record_id
-      )
-      recovered = PolicyHistoryIntake.released_relations(
-        context: journal.context, identity: value.fetch("identity"),
-        after_revision: value.fetch("content_policy_revision"),
-        after_generation: command.dig("owner", "generation"),
-        through_generation: through_generation, before_record_id: before_record_id
-      )
+      observed =
+        NativeFieldControlJournal.new(
+          context: journal.context
+        ).released_relations(
+          identity: value.fetch("identity"),
+          after_generation: command.dig("owner", "generation"),
+          through_generation: through_generation,
+          before_record_id: before_record_id
+        )
+      recovered =
+        PolicyHistoryIntake.released_relations(
+          context: journal.context,
+          identity: value.fetch("identity"),
+          after_revision: value.fetch("content_policy_revision"),
+          after_generation: command.dig("owner", "generation"),
+          through_generation: through_generation,
+          before_record_id: before_record_id
+        )
       (observed + recovered).uniq.freeze
     end
 
