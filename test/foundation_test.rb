@@ -20,6 +20,26 @@ class GhostConnectorFoundationTest < Minitest::Test
   OTHER = "20a59dad-638b-4290-a937-1a5fba7efeb1"
   SYNTHETIC_KEY = "a" * 64
 
+  def test_native_stage_errors_are_fixed_codes_without_arbitrary_upstream_text
+    %w[
+      native_state_not_ready
+      public_verification_failed
+      acknowledgement_unavailable
+      acknowledgement_not_current
+    ].each do |code|
+      error = DiscussionBridgeGhost::Error.new(code)
+      assert_equal code, error.code
+      refute_equal DiscussionBridgeGhost::Error::MESSAGES.fetch(
+                     "response_invalid"
+                   ),
+                   error.message
+    end
+    unknown =
+      DiscussionBridgeGhost::Error.new("untrusted-private-upstream-detail")
+    assert_equal "response_invalid", unknown.code
+    refute_includes unknown.message, "untrusted-private-upstream-detail"
+  end
+
   def test_source_activity_uses_actual_edit_not_creation_or_native_save
     assert_equal "2020-02-29T03:04:06.000Z",
                  DiscussionBridgeGhost::SourceActivity.publication_date(

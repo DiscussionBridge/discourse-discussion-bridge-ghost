@@ -2009,8 +2009,10 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       ).to eq(200)
       # Synthetic receiver rollback fixture ONLY. This is not a performed
       # backup/restore or installed rollback qualification.
-      @work.update!(state: "leased")
-      @mapping.update!(
+      @work.reload.update!(state: "leased")
+      # The real router updated these rows, not this fixture's old instances.
+      # Reload before assigning nil or dirty tracking would skip the restore.
+      @mapping.reload.update!(
         destination_native_id: nil,
         destination_native_revision: nil,
         synchronized_source_revision: nil,

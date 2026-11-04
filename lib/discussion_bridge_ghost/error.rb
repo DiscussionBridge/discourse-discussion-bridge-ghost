@@ -42,6 +42,14 @@ module DiscussionBridgeGhost
         "The actual source activity date could not be projected into Ghost. Original source metadata is preserved; no native-save or build-time fallback is selected.",
       "native_content_unrepresentable" =>
         "Ghost content preparation could not preserve the complete source content and references safely. Original source remains retained; no stripped replacement was published.",
+      "native_state_not_ready" =>
+        "The Ghost publication does not yet match the current authorized content and settings. Its saved work and native identity are retained.",
+      "public_verification_failed" =>
+        "The anonymous Ghost page could not be verified against the current publication. No verified acknowledgement was sent.",
+      "acknowledgement_unavailable" =>
+        "The publication acknowledgement could not be resolved. Its exact request and retained receipts are preserved for retry.",
+      "acknowledgement_not_current" =>
+        "The retained acknowledgement does not match the receiver's current work state. Reconcile the retained identities and receipts before continuing.",
       "identity_conflict" =>
         "Retained identity or request history requires reconciliation.",
       "disabled" => "This Ghost connector installation is disabled.",
