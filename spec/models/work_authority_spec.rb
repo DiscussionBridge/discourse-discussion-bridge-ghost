@@ -146,12 +146,14 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         DiscussionBridgeCmsCatalogUpload.where(
           content_connection_id: @connection.id
         )
+      snapshots =
+        DiscussionBridgeCmsCatalogSnapshot.where(
+          content_connection_id: @connection.id
+        )
       DiscussionBridgeCmsCatalogCursor.where(
-        content_connection_id: @connection.id
+        catalog_snapshot_id: snapshots.select(:id)
       ).delete_all
-      DiscussionBridgeCmsCatalogSnapshot.where(
-        content_connection_id: @connection.id
-      ).delete_all
+      snapshots.delete_all
       DiscussionBridgeCmsCatalogEntry.where(
         catalog_upload_id: uploads.select(:id)
       ).delete_all
