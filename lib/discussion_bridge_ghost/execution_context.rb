@@ -57,10 +57,10 @@ module DiscussionBridgeGhost
       end
     end
 
-    def read(route_id, path: {})
+    def read(route_id, path: {}, query: {})
       outside_transaction!
       assert!
-      packet = @protocol.prepare(route_id, path: path)
+      packet = @protocol.prepare(route_id, path: path, query: query)
       raise Error.new("identity_conflict") unless packet.method == "GET"
       result = @transport.execute(packet)
       assert!

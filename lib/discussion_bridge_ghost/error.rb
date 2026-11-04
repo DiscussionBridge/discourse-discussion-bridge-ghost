@@ -17,6 +17,10 @@ module DiscussionBridgeGhost
       "protocol_mismatch" =>
         "The installed connector and receiver protocol identities do not match.",
       "response_invalid" => "The upstream response is invalid.",
+      "source_intake_unavailable" =>
+        "Source intake could not continue. Its saved cursor, content and identities are retained; reconcile the reported receiver refusal before resuming.",
+      "source_content_limit" =>
+        "The complete source exceeds the configured Ghost preparation budget. No excerpt or incomplete article was substituted.",
       "ghost_http_failed" =>
         "The Ghost API request failed; retained native work must be reconciled before retrying a write.",
       "ghost_rate_limited" =>
