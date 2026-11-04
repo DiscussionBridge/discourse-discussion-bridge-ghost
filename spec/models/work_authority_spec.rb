@@ -1625,7 +1625,6 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     app: Rails.application,
     verify: true
   )
-    return unless verify
     3.times do
       with_runtime(app: app) do |context, mutations|
         intake =
@@ -1637,6 +1636,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         intake.advance
       end
     end
+    return unless verify
     3.times do
       with_runtime(app: app) do |context, mutations|
         intake =
