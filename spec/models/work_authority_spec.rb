@@ -2051,6 +2051,9 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
 
   def field_control_policy!(authors:, taxonomy:, withdraw: false)
     config = @connection.reload.cms_configuration.deep_dup
+    if withdraw
+      config.fetch("policy").fetch("include_topic_ids").delete(@topic.id.to_s)
+    end
     config.fetch("policy").merge!(
       "policy_revision" => SecureRandom.uuid,
       "author_ids" => authors,
@@ -2835,8 +2838,11 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     end
     original = Marshal.load(Marshal.dump(@field_control_native))
     field_control_policy!(authors: [], taxonomy: [], withdraw: true)
+    expect(@work.action).to eq("withdraw")
     with_runtime do |context, mutations|
       lease = claim(context, mutations, key: "claim:planned-withdrawal")
+      expect(lease.dig("work", "action")).to eq("withdraw")
+      expect(lease.dig("work", "work_id")).to eq(@work.work_id)
       held = authority(context, mutations, lease)
       commands =
         DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
