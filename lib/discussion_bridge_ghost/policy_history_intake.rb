@@ -414,10 +414,10 @@ module DiscussionBridgeGhost
         raise Error.new("identity_conflict") unless state == expected
       else
         page = verified_page(state.fetch("pages"))
+        expected_cursor = page.dig("body", "next_policy_revision") || @through
         unless Digest::SHA256.hexdigest(JSON.generate(page)) ==
                  state.fetch("sha256") &&
-                 state.fetch("cursor") ==
-                   (page.dig("body", "next_policy_revision") || @through)
+                 state.fetch("cursor") == expected_cursor
           raise Error.new("identity_conflict")
         end
       end
@@ -455,12 +455,12 @@ module DiscussionBridgeGhost
       last = row(PAGE, page_key(state.fetch("pages")))&.private_payload
       validate_page!(last, state.fetch("pages"))
       body = last.fetch("body")
+      expected_cursor = body.fetch("next_policy_revision") || @through
       unless Digest::SHA256.hexdigest(JSON.generate(last)) ==
                state.fetch("previous_sha256") &&
                state.fetch("complete") ==
                  body.fetch("next_policy_revision").nil? &&
-               state.fetch("next_policy_revision") ==
-                 (body.fetch("next_policy_revision") || @through)
+               state.fetch("next_policy_revision") == expected_cursor
         raise Error.new("identity_conflict")
       end
       state
@@ -477,16 +477,16 @@ module DiscussionBridgeGhost
         raise Error.new("identity_conflict")
       end
       @protocol.validate!("PolicyHistoryPage", page.fetch("body"))
+      first_page_valid =
+        ordinal != 1 ||
+          (
+            page.fetch("previous_sha256").nil? &&
+              page.dig("body", "after_policy_revision") == @after
+          )
       unless page.dig("body", "connection_id") ==
                @installation.connection_public_id &&
                page.dig("body", "through_policy_revision") == @through &&
-               (
-                 ordinal != 1 ||
-                   (
-                     page.fetch("previous_sha256").nil? &&
-                       page.dig("body", "after_policy_revision") == @after
-                   )
-               )
+               first_page_valid
         raise Error.new("identity_conflict")
       end
     end
