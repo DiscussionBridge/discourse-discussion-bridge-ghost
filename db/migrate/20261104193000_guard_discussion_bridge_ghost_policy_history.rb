@@ -20,6 +20,13 @@ class GuardDiscussionBridgeGhostPolicyHistory < ActiveRecord::Migration[7.0]
     # These are mutation sentinels, not checksums against privileged trigger
     # bypass or physical storage corruption outside PostgreSQL's guarantees.
     execute <<~SQL
+      -- Numeric, fixed-width generation ordering must not depend on the forum
+      -- database's locale or a punctuation sentinel in a compound locator.
+      CREATE INDEX idx_db_ghost_history_proof ON discussion_bridge_ghost_records
+        (installation_id, kind, mapping_public_id, (split_part(record_key, ':', 2)),
+         (split_part(record_key, ':', 3) COLLATE "C") DESC, id DESC)
+        WHERE kind = 'policy_history_verified_v2';
+
       CREATE FUNCTION discussion_bridge_ghost_history_group(kind text, locator text)
       RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$
       BEGIN
@@ -94,6 +101,7 @@ class GuardDiscussionBridgeGhostPolicyHistory < ActiveRecord::Migration[7.0]
 
   def down
     execute <<~SQL
+      DROP INDEX idx_db_ghost_history_proof;
       DROP TRIGGER discussion_bridge_ghost_history_truncated ON discussion_bridge_ghost_records;
       DROP TRIGGER discussion_bridge_ghost_history_changed ON discussion_bridge_ghost_records;
       DROP FUNCTION discussion_bridge_ghost_history_truncated();

@@ -18,6 +18,7 @@ module DiscussionBridgeGhost
     VERIFICATION = "policy_history_verification_v2"
     VERIFIED = "policy_history_verified_v2"
     REVISION = "policy_history_revision_v2"
+    GENERATION_SQL = "split_part(record_key, ':', 3) COLLATE \"C\""
     FIELDS = %w[
       format
       binding
@@ -258,9 +259,13 @@ module DiscussionBridgeGhost
           .operational_records
           .where(kind: VERIFIED, mapping_public_id: mapping)
           .where(
-            "record_key > ? AND record_key <= ?",
-            prefix + after_generation.to_s.rjust(16, "0") + ":~",
-            prefix + through_generation.to_s.rjust(16, "0") + ":~"
+            "split_part(record_key, ':', 2) = ?",
+            Digest::SHA256.hexdigest(after_revision)
+          )
+          .where(
+            "#{GENERATION_SQL} > ? AND #{GENERATION_SQL} <= ?",
+            after_generation.to_s.rjust(16, "0"),
+            through_generation.to_s.rjust(16, "0")
           )
       if before_record_id
         unless before_record_id.is_a?(Integer) && before_record_id.positive?
@@ -268,7 +273,7 @@ module DiscussionBridgeGhost
         end
         scope = scope.where("id < ?", before_record_id)
       end
-      record = scope.order(id: :desc).first
+      record = scope.order(Arel.sql("#{GENERATION_SQL} DESC"), id: :desc).first
       return [] unless record
       proof = record.private_payload
       unless proof.is_a?(Hash) &&

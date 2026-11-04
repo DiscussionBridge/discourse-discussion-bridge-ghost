@@ -31,7 +31,7 @@ RSpec.describe DiscussionBridgeGhost do
     )
   end
 
-  it "loads alongside the exact unchanged receiver and pinned Core" do
+  it "loads alongside the exact corrected receiver and pinned Core" do
     expect(DiscussionBridgeGhost::VERSION).to eq("0.4.0-alpha.1")
     expect(DiscussionBridge::CmsProtocol::CONTRACT_SHA256).to eq(
       "98d7904e987fbe306a51632d1fb37d6f78564915d127145027b992ec9a2723dc"
@@ -43,7 +43,7 @@ RSpec.describe DiscussionBridgeGhost do
     receiver_sha, receiver_status =
       Open3.capture2("git", "-C", receiver_root.to_s, "rev-parse", "HEAD")
     expect(receiver_status.success?).to eq(true)
-    expect(receiver_sha.strip).to eq("43be31be616b397c21786f74366e0a1c76b8f667")
+    expect(receiver_sha.strip).to eq("c34b46ae2bf4d93bb7dcb63d63f175f520110f00")
     core_sha, core_status =
       Open3.capture2("git", "-C", Rails.root.to_s, "rev-parse", "HEAD")
     expect(core_status.success?).to eq(true)
