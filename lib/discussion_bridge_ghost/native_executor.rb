@@ -3,6 +3,7 @@
 require_relative "native_effect_verifier"
 require_relative "native_command_journal"
 require_relative "native_owned_command"
+require_relative "native_baseline_journal"
 
 module DiscussionBridgeGhost
   # Unactivated native command executor. The public coordinator will supply
@@ -29,6 +30,7 @@ module DiscussionBridgeGhost
         api_key,
         authority,
         factory
+      @baselines = NativeBaselineJournal.new(context: context, journal: journal)
     end
 
     def execute(command_id)
@@ -37,9 +39,7 @@ module DiscussionBridgeGhost
         raise Error.new("native_command_retired")
       end
       command = retained.fetch("command")
-      if retained.dig("state", "completion")
-        return retained.dig("state", "completion")
-      end
+      return recover(command_id) if retained.dig("state", "completion")
       if retained.dig("state", "pending_attempt")
         raise Error.new("native_effect_uncertain")
       end
@@ -70,6 +70,9 @@ module DiscussionBridgeGhost
             maximum_bytes: command.dig("request", "maximum_bytes")
           )
         document.baseline_matches!(current)
+        if command.dig("candidate", "management")
+          @baselines.assert_before_write!(command, native: current)
+        end
         matches =
           client.find_by_resource(
             command.dig("identity", "resource_id"),
@@ -105,6 +108,10 @@ module DiscussionBridgeGhost
               maximum_bytes: command.dig("request", "maximum_bytes")
             ).empty?
         raise Error.new("identity_conflict")
+      end
+      if command.dig("candidate", "management") &&
+           command.dig("identity", "native_id").nil?
+        @baselines.assert_before_write!(command)
       end
       attempt = @journal.begin_attempt(command_id, http: http)
       request = command.fetch("request")
@@ -150,6 +157,9 @@ module DiscussionBridgeGhost
       @journal.reconcile_discovery!(command_id)
       retained = @journal.retained(command_id)
       if retained.dig("state", "completion")
+        if retained.dig("command", "candidate", "management")
+          @baselines.remember(command_id)
+        end
         return retained.dig("state", "completion")
       end
       response = retained.fetch("response")
@@ -162,11 +172,16 @@ module DiscussionBridgeGhost
         )
       evidence =
         verifier.verify(command: retained.fetch("command"), response: response)
-      @journal.retain_completion(
-        command_id,
-        verifier: verifier,
-        evidence: evidence
-      )
+      completion =
+        @journal.retain_completion(
+          command_id,
+          verifier: verifier,
+          evidence: evidence
+        )
+      if retained.dig("command", "candidate", "management")
+        @baselines.remember(command_id)
+      end
+      completion
     end
   end
 end

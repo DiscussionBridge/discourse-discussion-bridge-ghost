@@ -4,6 +4,7 @@ require "rails_helper"
 require_relative "../../lib/discussion_bridge_ghost/native_command_journal"
 require_relative "../../lib/discussion_bridge_ghost/native_executor"
 require_relative "../../lib/discussion_bridge_ghost/native_managed_baseline"
+require_relative "../../lib/discussion_bridge_ghost/native_baseline_journal"
 
 RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
   self.use_transactional_tests = false
@@ -794,6 +795,413 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
           native.merge("custom_excerpt" => "x" * 262_144)
         )
       }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+  end
+
+  def baseline_journal(journal, context)
+    DiscussionBridgeGhost::NativeBaselineJournal.new(
+      context: context,
+      journal: journal
+    )
+  end
+
+  def baseline_rows
+    @installation
+      .operational_records
+      .where(kind: %w[native_managed_baseline native_managed_head])
+      .order(:id)
+  end
+
+  def change_private_record(record, value)
+    record.update!(
+      encrypted_payload:
+        @installation.envelope.encrypt(
+          "operational_record",
+          value,
+          binding: JSON.generate([record.kind, record.record_key])
+        )
+    )
+  end
+
+  it "retains the proven baseline across a new locked run without exposing content or rewriting physical history" do
+    first = nil
+    expected = nil
+    history = nil
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      baseline, = managed_completion(journal, context, first)
+      expected = baseline.sha256
+      history =
+        @installation
+          .operational_records
+          .where.not(kind: %w[native_managed_baseline native_managed_head])
+          .order(:id)
+          .pluck(:id, :encrypted_payload)
+      expect(baseline_rows.count).to eq(2)
+      expect(baseline_rows.pluck(:encrypted_payload).join).not_to include(
+        "Proven body",
+        "Proven complete article",
+        first.fetch(:command_id)
+      )
+    end
+    with_journal do |journal, context|
+      saved = baseline_journal(journal, context)
+      rebuilt = saved.current(first.dig(:owner, "mapping_id"))
+      expect(rebuilt.sha256).to eq(expected)
+      expect(rebuilt.value).to be_frozen
+      expect(saved.remember(first.fetch(:command_id)).sha256).to eq(expected)
+      expect(baseline_rows.count).to eq(2)
+      expect(
+        @installation
+          .operational_records
+          .where.not(kind: %w[native_managed_baseline native_managed_head])
+          .order(:id)
+          .pluck(:id, :encrypted_payload)
+      ).to eq(history)
+      expect(saved.inspect).not_to include(
+        first.fetch(:command_id),
+        "Proven body"
+      )
+    end
+  end
+
+  it "never rewinds the current baseline when an old completed command is recovered or replayed" do
+    first = nil
+    latest = nil
+    current_id = nil
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      draft, native = managed_completion(journal, context, first)
+      publish =
+        managed_arguments(
+          context,
+          stage: "publish",
+          previous: native,
+          first: first
+        )
+      published, live =
+        managed_completion(journal, context, publish, previous: draft)
+      withdraw =
+        managed_arguments(
+          context,
+          stage: "withdraw",
+          previous: live,
+          first: first
+        )
+      withdrawn, =
+        managed_completion(journal, context, withdraw, previous: published)
+      latest, current_id = withdrawn.sha256, withdraw.fetch(:command_id)
+      saved = baseline_journal(journal, context)
+      before = baseline_rows.pluck(:id, :encrypted_payload)
+      saved.remember(first.fetch(:command_id))
+      DiscussionBridgeGhost::NativeExecutor.new(
+        context: context,
+        journal: journal,
+        api_key: "a" * 24 + ":" + "12" * 32
+      ).recover(publish.fetch(:command_id))
+      expect(saved.current(first.dig(:owner, "mapping_id")).sha256).to eq(
+        latest
+      )
+      expect(saved.retained(first.fetch(:command_id)).sha256).to eq(
+        draft.sha256
+      )
+      expect(baseline_rows.pluck(:id, :encrypted_payload)).to eq(before)
+    end
+    with_journal do |journal, context|
+      current =
+        baseline_journal(journal, context).current(
+          first.dig(:owner, "mapping_id")
+        )
+      expect(current.sha256).to eq(latest)
+      expect(current.value.fetch("command_id")).to eq(current_id)
+      expect(current.value.fetch("scalars").fetch("status")).to eq("draft")
+      expect(current.value.fetch("content_command_id")).not_to eq(current_id)
+    end
+  end
+
+  it "atomically enrolls the baseline and head and recovers a crash after physical completion without repeating the POST" do
+    first = nil
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      fired = false
+      fault =
+        TracePoint.new(:return) do |event|
+          if event.self.is_a?(DiscussionBridgeGhost::NativeBaselineJournal) &&
+               event.method_id == :create_record &&
+               event.binding.local_variable_get(:kind) ==
+                 "native_managed_baseline"
+            fired = true
+            raise DiscussionBridgeGhost::Error.new("identity_conflict")
+          end
+        end
+      expect {
+        fault.enable { managed_completion(journal, context, first) }
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(fired).to eq(true)
+      expect(baseline_rows.count).to eq(0)
+      expect(
+        journal.retained(first.fetch(:command_id)).dig("state", "completion")
+      ).not_to eq(nil)
+    end
+    with_journal do |journal, context|
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: journal,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      executor.recover(first.fetch(:command_id))
+      expect(baseline_rows.count).to eq(2)
+      expect(
+        baseline_journal(journal, context).current(
+          first.dig(:owner, "mapping_id")
+        )
+      ).to be_a(DiscussionBridgeGhost::NativeManagedBaseline)
+    end
+    expect(
+      a_request(
+        :post,
+        @installation.native_target.admin_origin + first.dig(:request, "path")
+      )
+    ).to have_been_made.once
+  end
+
+  it "rejects an orphaned baseline instead of treating a missing head as a new publication" do
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      managed_completion(journal, context, first)
+      row("native_managed_head", first.dig(:owner, "mapping_id")).delete
+      saved = baseline_journal(journal, context)
+      expect { saved.current(first.dig(:owner, "mapping_id")) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect { saved.remember(first.fetch(:command_id)) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect(baseline_rows.count).to eq(1)
+    end
+  end
+
+  it "rejects a missing predecessor without resetting retained state" do
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      draft, native = managed_completion(journal, context, first)
+      second =
+        managed_arguments(
+          context,
+          stage: "publish",
+          previous: native,
+          first: first
+        )
+      managed_completion(journal, context, second, previous: draft)
+      row("native_managed_baseline", first.fetch(:command_id)).delete
+      before = encrypted_snapshot
+      expect {
+        baseline_journal(journal, context).current(
+          first.dig(:owner, "mapping_id")
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(encrypted_snapshot).to eq(before)
+    end
+  end
+
+  it "does not accept an authenticated projection whose fields were changed away from the actual completed command" do
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      managed_completion(journal, context, first)
+      stored = row("native_managed_baseline", first.fetch(:command_id))
+      original = stored.private_payload
+      altered = Marshal.load(Marshal.dump(original))
+      altered["baseline"]["scalars"]["title"] = "Forged prior title"
+      altered["baseline_sha256"] = Digest::SHA256.hexdigest(
+        JSON.generate(altered.fetch("baseline"))
+      )
+      change_private_record(stored, altered)
+      change_private_record(
+        row("native_managed_head", first.dig(:owner, "mapping_id")),
+        altered.slice(
+          *DiscussionBridgeGhost::NativeBaselineJournal::HEAD_FIELDS
+        ).merge("format" => "ghost-native-baseline-head-1")
+      )
+      before = encrypted_snapshot
+      expect {
+        baseline_journal(journal, context).current(
+          first.dig(:owner, "mapping_id")
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(encrypted_snapshot).to eq(before)
+    end
+  end
+
+  it "refuses copied ciphertext instead of accepting it under another row key" do
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      managed_completion(journal, context, first)
+      original = row("native_managed_baseline", first.fetch(:command_id))
+      ciphertext = original.encrypted_payload
+      head = row("native_managed_head", first.dig(:owner, "mapping_id"))
+      head.update_columns(encrypted_payload: ciphertext)
+      expect {
+        baseline_journal(journal, context).current(
+          first.dig(:owner, "mapping_id")
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+  end
+
+  it "refuses a changed mapping locator and loss of original completion evidence" do
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      managed_completion(journal, context, first)
+      stored = row("native_managed_baseline", first.fetch(:command_id))
+      stored.update_columns(mapping_public_id: SecureRandom.uuid)
+      expect {
+        baseline_journal(journal, context).current(
+          first.dig(:owner, "mapping_id")
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      stored.update_columns(mapping_public_id: first.dig(:owner, "mapping_id"))
+      row("native_command", first.fetch(:command_id)).delete
+      before = encrypted_snapshot
+      expect {
+        baseline_journal(journal, context).current(
+          first.dig(:owner, "mapping_id")
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(encrypted_snapshot).to eq(before)
+    end
+  end
+
+  it "does not enroll descriptor-free physical history or incomplete commands as a baseline" do
+    with_journal do |journal, context|
+      old = arguments
+      _command, native = completed_response(journal, context, old)
+      stub_native_reads(old, native)
+      DiscussionBridgeGhost::NativeExecutor.new(
+        context: context,
+        journal: journal,
+        api_key: "a" * 24 + ":" + "12" * 32
+      ).recover(old.fetch(:command_id))
+      expect {
+        baseline_journal(journal, context).remember(old.fetch(:command_id))
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(baseline_rows.count).to eq(0)
+      pending = managed_arguments(context)
+      journal.prepare(**pending)
+      expect {
+        baseline_journal(journal, context).remember(pending.fetch(:command_id))
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(baseline_rows.count).to eq(0)
+    end
+  end
+
+  it "checks the last proven managed state before a subsequent write rather than blessing an already-edited CAS baseline" do
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      _draft, native = managed_completion(journal, context, first)
+      changed =
+        native.merge("title" => "An editor changed this before preparation")
+      second =
+        managed_arguments(
+          context,
+          stage: "publish",
+          previous: changed,
+          first: first
+        )
+      command = journal.prepare(**second)
+      before = encrypted_snapshot
+      expect {
+        baseline_journal(journal, context).assert_before_write!(
+          command,
+          native: changed
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(encrypted_snapshot).to eq(before)
+      expect(
+        journal.retained(second.fetch(:command_id)).dig("state", "event_count")
+      ).to eq(0)
+    end
+    expect(a_request(:put, %r{ghost/api/admin})).not_to have_been_made
+  end
+
+  it "requires the same retained native identity for prewrite checks but preserves unrelated editor changes" do
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      _draft, native = managed_completion(journal, context, first)
+      updated =
+        native.merge(
+          "custom_excerpt" => "Editor-controlled setting",
+          "authors" => [{ "id" => "d" * 24 }]
+        )
+      second =
+        managed_arguments(
+          context,
+          stage: "publish",
+          previous: updated,
+          first: first
+        )
+      command = journal.prepare(**second)
+      saved = baseline_journal(journal, context)
+      expect(saved.assert_before_write!(command, native: updated)).to eq(true)
+      expect {
+        saved.assert_before_write!(
+          command,
+          native: updated.merge("id" => "f" * 24)
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect {
+        saved.assert_before_write!(
+          command.merge(
+            "owner" => command.fetch("owner").merge("external_id" => "other")
+          ),
+          native: updated
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect {
+        saved.assert_before_write!(
+          command,
+          native: updated.merge("visibility" => "members")
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+  end
+
+  it "restores the current managed value using a bounded set of commands even after many revisions" do
+    first = nil
+    expected = nil
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      previous, native = managed_completion(journal, context, first)
+      12.times do
+        revision =
+          managed_arguments(
+            context,
+            stage: "publish",
+            previous: native,
+            first: first
+          )
+        previous, native =
+          managed_completion(journal, context, revision, previous: previous)
+      end
+      expected = previous.sha256
+    end
+    with_journal do |journal, context|
+      reads = 0
+      observer =
+        TracePoint.new(:call) do |event|
+          reads += 1 if event.self.equal?(journal) &&
+            event.method_id == :retained
+        end
+      rebuilt = nil
+      observer.enable do
+        rebuilt =
+          baseline_journal(journal, context).current(
+            first.dig(:owner, "mapping_id")
+          )
+      end
+      expect(rebuilt.sha256).to eq(expected)
+      expect(reads).to be <= 7
+      expect(baseline_rows.count).to eq(14)
     end
   end
 

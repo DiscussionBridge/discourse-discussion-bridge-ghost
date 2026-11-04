@@ -8,7 +8,7 @@ module DiscussionBridgeGhost
   # A detached last-PROVEN managed state, derived only from the real journal's
   # validated completion history. Neither this value nor a matching current
   # document is a current work grant, public proof, ownership receipt or ACK.
-  # The later ownership ledger must retain/reconstruct these observations; it
+  # The protected baseline journal retains/reconstructs these observations; it
   # must not call today's native document or desired policy the old baseline.
   class NativeManagedBaseline
     include ProtectedDiagnostics
@@ -121,17 +121,13 @@ module DiscussionBridgeGhost
         end
       prior_profile = management.value.fetch("stage") == "withdraw"
       @value =
-        snapshot(
-          "format" => "ghost-native-managed-baseline-1",
-          "binding" => command.fetch("binding"),
-          "identity" => @identity,
-          "command_id" => command.fetch("command_id"),
-          "command_sha256" => completion.fetch("command_sha256"),
-          "effect_sha256" =>
-            Digest::SHA256.hexdigest(JSON.generate(completion)),
-          "previous_sha256" => previous&.sha256,
-          "management" => management.value,
-          "content_command_id" =>
+        build_value(
+          command: command,
+          completion: completion,
+          management: management,
+          native: native,
+          previous_sha256: previous&.sha256,
+          content_command_id:
             (
               if prior_profile
                 previous.value.fetch("content_command_id")
@@ -139,7 +135,7 @@ module DiscussionBridgeGhost
                 command.fetch("command_id")
               end
             ),
-          "content_policy_revision" =>
+          content_policy_revision:
             (
               if prior_profile
                 previous.value.fetch("content_policy_revision")
@@ -147,8 +143,8 @@ module DiscussionBridgeGhost
                 management.value.fetch("policy_revision")
               end
             ),
-          "scalars" => scalars,
-          "authors" =>
+          scalars: scalars,
+          authors:
             (
               if prior_profile
                 previous.value.fetch("authors")
@@ -156,29 +152,175 @@ module DiscussionBridgeGhost
                 management.value.fetch("author_ids")
               end
             ),
-          "taxonomy" =>
+          taxonomy:
             (
               if prior_profile
                 previous.value.fetch("taxonomy")
               else
                 management.value.fetch("taxonomy_ids")
               end
-            ),
-          "fragment" => fragment,
-          "automation_tags" => automation_tags(native)
+            )
         )
       # Withdrawal has no new article edition or metadata profile. A status-only
       # completion must not bless preexisting managed edits as a new baseline.
       if prior_profile && fragment != previous.value.fetch("fragment")
         raise Error.new("identity_conflict")
       end
-      assert_current!(native)
-      @sha256 = Digest::SHA256.hexdigest(JSON.generate(@value)).freeze
-      freeze
+      finish!(native)
     rescue KeyError, ArgumentError, TypeError, JSON::GeneratorError
       raise Error.new("identity_conflict"), cause: nil
     end
     private_class_method :new
+
+    # Only NativeBaselineJournal invokes this private restoration hook AFTER
+    # reading authenticated, installation/key-bound retained rows and validating
+    # their head, root, direct predecessor and content-command references. This
+    # is not a public importer for caller-provided hashes. Rebuild every managed
+    # field from real command completions, not from the saved projection alone.
+    def self.restore(
+      protocol:,
+      command:,
+      completion:,
+      content_command:,
+      content_completion:,
+      value:
+    )
+      restored = allocate
+      restored.send(
+        :initialize_saved,
+        protocol: protocol,
+        command: command,
+        completion: completion,
+        content_command: content_command,
+        content_completion: content_completion,
+        value: value
+      )
+      restored
+    end
+    private_class_method :restore
+
+    def initialize_saved(
+      protocol:,
+      command:,
+      completion:,
+      content_command:,
+      content_completion:,
+      value:
+    )
+      @maximum = command.dig("request", "maximum_bytes")
+      @identity = {
+        "mapping_id" => command.dig("owner", "mapping_id"),
+        "external_id" => command.dig("owner", "external_id"),
+        "resource_id" => command.dig("identity", "resource_id"),
+        "native_id" => completion.fetch("native_id"),
+        "kind" => completion.fetch("kind")
+      }
+      management =
+        NativeManagement.new(
+          protocol: protocol,
+          value: command.fetch("candidate").fetch("management")
+        )
+      content_management =
+        NativeManagement.new(
+          protocol: protocol,
+          value: content_command.fetch("candidate").fetch("management")
+        )
+      management.validate_command!(command)
+      content_management.validate_command!(content_command)
+      if content_management.value.fetch("stage") == "withdraw" ||
+           content_command.fetch("binding") != command.fetch("binding") ||
+           content_command.dig("owner", "mapping_id") !=
+             @identity.fetch("mapping_id") ||
+           content_command.dig("owner", "external_id") !=
+             @identity.fetch("external_id") ||
+           content_command.dig("identity", "resource_id") !=
+             @identity.fetch("resource_id") ||
+           content_completion.fetch("native_id") !=
+             @identity.fetch("native_id") ||
+           content_completion.fetch("kind") != @identity.fetch("kind")
+        raise Error.new("identity_conflict")
+      end
+      withdrawal = management.value.fetch("stage") == "withdraw"
+      unless withdrawal ||
+               (content_command == command && content_completion == completion)
+        raise Error.new("identity_conflict")
+      end
+      native = snapshot(completion.fetch("native"))
+      content_native = snapshot(content_completion.fetch("native"))
+      fragment = fragment_state(native)
+      NativeOwnedCommand.new(
+        command: command,
+        expected_mode: fragment.fetch("mode")
+      ).validate!
+      NativeOwnedCommand.new(
+        command: content_command,
+        expected_mode: fragment_state(content_native).fetch("mode")
+      ).validate!
+      scalars =
+        content_management
+          .value
+          .fetch("scalar_fields")
+          .to_h { |field| [field, content_native.fetch(field)] }
+      scalars = scalars.merge("status" => native.fetch("status")) if withdrawal
+      @value =
+        build_value(
+          command: command,
+          completion: completion,
+          management: management,
+          native: native,
+          previous_sha256: value.fetch("previous_sha256"),
+          content_command_id: content_command.fetch("command_id"),
+          content_policy_revision:
+            content_management.value.fetch("policy_revision"),
+          scalars: scalars,
+          authors: content_management.value.fetch("author_ids"),
+          taxonomy: content_management.value.fetch("taxonomy_ids")
+        )
+      unless @value == value &&
+               (!withdrawal || fragment == fragment_state(content_native))
+        raise Error.new("identity_conflict")
+      end
+      finish!(native)
+    rescue KeyError, ArgumentError, TypeError, JSON::GeneratorError
+      raise Error.new("identity_conflict"), cause: nil
+    end
+
+    def build_value(
+      command:,
+      completion:,
+      management:,
+      native:,
+      previous_sha256:,
+      content_command_id:,
+      content_policy_revision:,
+      scalars:,
+      authors:,
+      taxonomy:
+    )
+      snapshot(
+        "format" => "ghost-native-managed-baseline-1",
+        "binding" => command.fetch("binding"),
+        "identity" => @identity,
+        "command_id" => command.fetch("command_id"),
+        "command_sha256" => completion.fetch("command_sha256"),
+        "effect_sha256" => Digest::SHA256.hexdigest(JSON.generate(completion)),
+        "previous_sha256" => previous_sha256,
+        "management" => management.value,
+        "content_command_id" => content_command_id,
+        "content_policy_revision" => content_policy_revision,
+        "scalars" => scalars,
+        "authors" => authors,
+        "taxonomy" => taxonomy,
+        "fragment" => fragment_state(native),
+        "automation_tags" => automation_tags(native)
+      )
+    end
+
+    def finish!(native)
+      assert_current!(native)
+      @sha256 = Digest::SHA256.hexdigest(JSON.generate(@value)).freeze
+      freeze
+    end
 
     def fragment_state(native)
       html = native.fetch("html")
