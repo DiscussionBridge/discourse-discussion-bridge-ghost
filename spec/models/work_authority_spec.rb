@@ -4,6 +4,7 @@ require "rails_helper"
 require_relative "../../lib/discussion_bridge_ghost/native_command_journal"
 require_relative "../../lib/discussion_bridge_ghost/native_executor"
 require_relative "../../lib/discussion_bridge_ghost/native_ownership_journal"
+require_relative "../../lib/discussion_bridge_ghost/native_acknowledgements"
 
 RSpec.describe DiscussionBridgeGhost::WorkAuthority do
   self.use_transactional_tests = false
@@ -80,14 +81,15 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       )
     @admin = Fabricate(:admin)
     @topic = Fabricate(:topic, user: @admin)
-    Fabricate(
-      :post,
-      topic: @topic,
-      user: @admin,
-      post_number: 1,
-      raw: "Synthetic native authority source.",
-      cooked: "<p>Synthetic native authority source.</p>"
-    )
+    @source_post =
+      Fabricate(
+        :post,
+        topic: @topic,
+        user: @admin,
+        post_number: 1,
+        raw: "Synthetic native authority source.",
+        cooked: "<p>Synthetic native authority source.</p>"
+      )
     @record =
       DiscussionBridgeBridgeRecord.create!(
         resource_id: SecureRandom.uuid,
@@ -142,6 +144,31 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     end
     @target.delete if @target&.persisted?
     if @connection&.persisted?
+      streams =
+        DiscussionBridgeCmsSourceStream.where(
+          content_connection_id: @connection.id
+        )
+      intents =
+        DiscussionBridgeCmsSourceIntent.where(
+          cms_source_stream_id: streams.select(:id)
+        )
+      cursors =
+        DiscussionBridgeCmsSourceCursor.where(
+          cms_source_stream_id: streams.select(:id)
+        )
+      DiscussionBridgeCmsSourceSnapshotItem.where(
+        snapshot_root_id: cursors.select(:id)
+      ).delete_all
+      cursors.delete_all
+      DiscussionBridgeCmsSourceRevision.where(
+        cms_source_intent_id: intents.select(:id)
+      ).delete_all
+      intents.update_all(publication_event_id: nil)
+      DiscussionBridgeCmsSourceEvent.where(
+        cms_source_stream_id: streams.select(:id)
+      ).delete_all
+      intents.delete_all
+      streams.delete_all
       uploads =
         DiscussionBridgeCmsCatalogUpload.where(
           content_connection_id: @connection.id
@@ -1410,7 +1437,13 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     }
   end
 
-  def field_control_initial_publication(context, lease, held, legacy: false)
+  def field_control_initial_publication(
+    context,
+    lease,
+    held,
+    legacy: false,
+    complete: false
+  )
     commands = DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
     args, html = native_arguments(context, lease, native_id: nil, create: true)
     fields = args.fetch(:candidate).merge("visibility" => "public")
@@ -1511,7 +1544,16 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     commands.prepare(**args)
     executor.execute(args.fetch(:command_id))
     publication =
-      managed_publish_arguments(context, lease, @field_control_native)
+      if complete
+        complete_publication_arguments(
+          context,
+          lease,
+          held,
+          @field_control_native
+        )
+      else
+        managed_publish_arguments(context, lease, @field_control_native)
+      end
     if legacy
       publication.fetch(:candidate)[
         "management"
@@ -1549,6 +1591,318 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     @field_control_native["updated_at"] = (
       Time.iso8601(@field_control_native.fetch("updated_at")) + 1
     ).iso8601(3)
+  end
+
+  def native_stage_source_policy!
+    config = @connection.reload.cms_configuration.deep_dup
+    config.fetch("policy").merge!(
+      "selection" => "categories",
+      "category_ids" => [],
+      "include_topic_ids" => [@topic.id.to_s],
+      "policy_revision" => SecureRandom.uuid
+    )
+    @connection.update_columns(cms_configuration: config)
+    @snapshot =
+      DiscussionBridge::CmsSourceStore
+        .new(@connection)
+        .capture_snapshot(@topic)
+        .metadata
+    @work =
+      DiscussionBridge::CmsWorkCoordinator.new(@connection).enqueue!(
+        @mapping,
+        source_snapshot: @snapshot
+      )
+    DiscussionBridge::CmsSourceStore.new(@connection).refresh_all!
+  end
+
+  def native_stage_source(context)
+    intake = DiscussionBridgeGhost::SourceIntake.new(context: context)
+    page = intake.advance
+    item =
+      page
+        .fetch("items")
+        .find { |entry| entry.dig("source", "source_id") == @mapping.source_id }
+    expect(item).to be_present
+    @native_event_id = item.fetch("event_id")
+    expect(
+      intake.advance_content(@native_event_id, chunk_budget: 8).fetch(
+        "complete"
+      )
+    ).to eq(true)
+    @native_event_id
+  end
+
+  def complete_publication_arguments(context, lease, held, native)
+    args, = native_arguments(context, lease)
+    root =
+      Nokogiri::HTML5.fragment(
+        native.fetch("html"),
+        **DiscussionBridgeGhost::OwnedFragment::OPTIONS
+      )
+    section = root.at_css("section[data-discussionbridge-owned]")
+    fragment =
+      DiscussionBridgeGhost::OwnedFragment.new(
+        resource_id: @record.resource_id,
+        kind: "post",
+        native_id: native.fetch("id"),
+        nonce: section["data-discussionbridge-fragment-nonce"],
+        maximum_bytes: 262_144
+      )
+    prior =
+      DiscussionBridgeGhost::OwnedFragment.new(
+        resource_id: @record.resource_id,
+        kind: "post",
+        native_id: section["data-discussionbridge-native-id"],
+        nonce: fragment.nonce,
+        maximum_bytes: 262_144
+      )
+    intake = DiscussionBridgeGhost::SourceIntake.new(context: context)
+    article =
+      DiscussionBridgeGhost::NativeArticle.new(
+        protocol: context.protocol,
+        forum_origin: context.binding.fetch("forum_origin"),
+        source: intake.source(@native_event_id),
+        html: intake.content(@native_event_id),
+        maximum_bytes: 262_144
+      )
+    connection = context.read("V4-01").value
+    mapping =
+      context.read("V4-11", path: { "mapping_id" => @mapping.mapping_id }).value
+    publication =
+      DiscussionBridgeGhost::NativePublication.new(
+        protocol: context.protocol,
+        article: article,
+        fragment: fragment,
+        mapping: mapping,
+        work: lease.fetch("work"),
+        forum_name: connection.fetch("forum_name"),
+        command_id: args.fetch(:command_id)
+      )
+    management = held.native_management!(stage: "publish")
+    fields = {
+      "id" => native.fetch("id"),
+      "updated_at" => native.fetch("updated_at"),
+      "title" => publication.title,
+      "slug" => native.fetch("slug"),
+      "status" => "published",
+      "visibility" => "public",
+      "published_at" => publication.publication_date,
+      "lexical" =>
+        DiscussionBridgeGhost::OwnedLexical.new(fragment: fragment).replace(
+          current: native,
+          html: publication.html,
+          expected_revision: native.fetch("updated_at"),
+          baseline_sha256: prior.extract(native.fetch("html")).sha256,
+          prior_fragment: prior
+        ),
+      "tags" =>
+        native.fetch("tags") +
+          [
+            { "id" => "d" * 24, "name" => "#discussionbridge-source" },
+            {
+              "id" => "e" * 24,
+              "name" =>
+                "#discussionbridge-#{mapping.fetch("presentation_mode")}"
+            }
+          ]
+    }
+    if management.value.fetch("author_ids")
+      fields["authors"] = management
+        .value
+        .fetch("author_ids")
+        .map { |id| { "id" => id } }
+    end
+    if management.value.fetch("taxonomy_ids")
+      fields["tags"] = fields
+        .fetch("tags")
+        .select { |tag| tag.fetch("name").start_with?("#discussionbridge-") } +
+        management
+          .value
+          .fetch("taxonomy_ids")
+          .map { |id| { "id" => id, "name" => "Selected #{id}" } }
+    end
+    # Native API URL fixture, not an anonymous-public-page verification claim.
+    @field_control_native = native.merge("url" => @binding.canonical_url)
+    args[:baseline] = @field_control_native
+    args[:candidate] = @field_control_native.merge(fields).merge(
+      "management" => management.value
+    )
+    args[:request]["body_bytes"] = JSON.generate("posts" => [fields])
+    args
+  end
+
+  def native_acknowledgements(context, mutations, commands, held, lease)
+    DiscussionBridgeGhost::NativeAcknowledgements.new(
+      context: context,
+      commands: commands,
+      authority: held,
+      journal: mutations,
+      lease: lease,
+      api_key: "a" * 24 + ":" + "12" * 32
+    )
+  end
+
+  it "synchronizes actual complete native content and verifies its anonymous public fragment through V4" do
+    native_stage_source_policy!
+    old_lease = nil
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = old_lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held, complete: true)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      stages =
+        native_acknowledgements(context, mutations, commands, held, lease)
+      synced = stages.synchronize(event_id: @native_event_id)
+      expect(synced.result.status).to eq(200)
+      expect(synced.observed.dig("work", "state")).to eq("synchronized")
+      expect(synced.historical).to eq(false)
+      expect(@mapping.reload.destination_native_id).to eq("a" * 24)
+      expect { held.guard!(operation: :mutate) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      page =
+        "<!doctype html><html><head><title>Native Ghost fixture</title></head><body>#{@field_control_native.fetch("html")}</body></html>"
+      public_get =
+        stub_request(:get, @binding.canonical_url)
+          .with do |request|
+            expect(request.headers.keys).not_to include(
+              "Authorization",
+              "Cookie"
+            )
+            true
+          end
+          .to_return(
+            status: 200,
+            headers: {
+              "Content-Type" => "text/html; charset=utf-8"
+            },
+            body: page
+          )
+      verified = stages.verify(event_id: @native_event_id)
+      expect(verified.result.status).to eq(200)
+      expect(verified.observed.dig("work", "state")).to eq("verified")
+      expect(verified.historical).to eq(false)
+      expect(@mapping.reload.publicly_verified_source_revision).to eq(
+        @snapshot.fetch("source_revision")
+      )
+      expect(public_get).to have_been_requested.once
+    end
+    before =
+      @installation
+        .operational_records
+        .where(kind: "native_acknowledgement_intent")
+        .order(:id)
+        .pluck(:encrypted_payload)
+    with_runtime do |context, mutations|
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      stages =
+        native_acknowledgements(
+          context,
+          mutations,
+          commands,
+          authority(context, mutations, old_lease),
+          old_lease
+        )
+      replay = stages.verify(event_id: @native_event_id)
+      expect(replay.historical).to eq(true)
+      expect(replay.result.status).to eq(200)
+      expect(replay.observed.dig("work", "state")).to eq("verified")
+    end
+    expect(
+      @installation
+        .operational_records
+        .where(kind: "native_acknowledgement_intent")
+        .order(:id)
+        .pluck(:encrypted_payload)
+    ).to eq(before)
+    expect(
+      a_request(
+        :post,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+      )
+    ).to have_been_made.once
+    expect(
+      a_request(
+        :put,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+      )
+    ).to have_been_made.once
+  end
+
+  it "does not acknowledge an owned but incomplete or old desired publication" do
+    native_stage_source_policy!
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held)
+      stages =
+        native_acknowledgements(
+          context,
+          mutations,
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context),
+          held,
+          lease
+        )
+      expect { stages.synchronize(event_id: @native_event_id) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect(@work.reload.state).to eq("leased")
+      expect(@installation.mutations.where(route_id: "V4-16").count).to eq(0)
+      expect(
+        @installation
+          .operational_records
+          .where(kind: "native_acknowledgement_intent")
+          .count
+      ).to eq(0)
+    end
+  end
+
+  it "keeps synchronized work unverified for a wrong public representation, redirect or login-only response" do
+    native_stage_source_policy!
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held, complete: true)
+      stages =
+        native_acknowledgements(
+          context,
+          mutations,
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context),
+          held,
+          lease
+        )
+      expect(
+        stages.synchronize(event_id: @native_event_id).result.status
+      ).to eq(200)
+      [
+        {
+          status: 200,
+          headers: {
+            "Content-Type" => "text/html"
+          },
+          body: "<html><body>Wrong page</body></html>"
+        },
+        {
+          status: 302,
+          headers: {
+            "Location" => "#{@target.ghost_origin}/login/"
+          }
+        },
+        { status: 401 }
+      ].each do |response|
+        stub_request(:get, @binding.canonical_url).to_return(response)
+        expect { stages.verify(event_id: @native_event_id) }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+        expect(@work.reload.state).to eq("synchronized")
+        expect(@installation.mutations.where(route_id: "V4-16").count).to eq(1)
+      end
+    end
   end
 
   %w[authors taxonomy]

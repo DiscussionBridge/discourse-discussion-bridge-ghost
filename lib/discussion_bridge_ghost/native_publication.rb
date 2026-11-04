@@ -21,7 +21,8 @@ module DiscussionBridgeGhost
       mapping:,
       work:,
       forum_name:,
-      command_id:
+      command_id:,
+      purpose: :prepare
     )
       unless protocol.is_a?(WireProtocol) && article.is_a?(NativeArticle) &&
                fragment.is_a?(OwnedFragment)
@@ -37,8 +38,13 @@ module DiscussionBridgeGhost
       native_binding_matches =
         mapping.fetch("destination_native_id").nil? ||
           fragment.native_id == mapping.fetch("destination_native_id")
-      unless work.fetch("action") == "publish_revision" &&
-               work.fetch("state") == "leased" &&
+      valid_stage =
+        (purpose == :prepare && work.fetch("state") == "leased") ||
+          (
+            purpose == :compare &&
+              %w[leased synchronized].include?(work.fetch("state"))
+          )
+      unless work.fetch("action") == "publish_revision" && valid_stage &&
                work.fetch("lease_generation").positive? &&
                work.fetch("mapping_id") == mapping.fetch("mapping_id") &&
                mapping.fetch("mapping_state") != "withdrawn" &&

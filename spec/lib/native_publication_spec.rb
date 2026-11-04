@@ -288,4 +288,21 @@ RSpec.describe DiscussionBridgeGhost::NativePublication do
     expect(article.original_html).to eq(source_html)
     expect(article.source.fetch("content_bytes")).to eq(source_html.bytesize)
   end
+
+  it "compares synchronized content without enabling preparation or terminal re-entry" do
+    original = prepare
+    synchronized = work.merge("state" => "synchronized")
+    comparison = prepare(work: synchronized, purpose: :compare)
+    expect(comparison.html).to eq(original.html)
+    expect(comparison.representation).to eq(original.representation)
+    expect { prepare(work: synchronized) }.to raise_error(
+      DiscussionBridgeGhost::Error
+    )
+    expect {
+      prepare(work: work.merge("state" => "verified"), purpose: :compare)
+    }.to raise_error(DiscussionBridgeGhost::Error)
+    expect { prepare(purpose: :other) }.to raise_error(
+      DiscussionBridgeGhost::Error
+    )
+  end
 end
