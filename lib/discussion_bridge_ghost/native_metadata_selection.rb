@@ -76,8 +76,8 @@ module DiscussionBridgeGhost
         "complete" => complete?(state),
         "batches" => processed,
         "remaining" =>
-          KINDS.sum do |kind|
-            ids(kind).length - state.fetch("offsets").fetch(kind)
+          KINDS.sum do |name|
+            ids(name).length - state.fetch("offsets").fetch(name)
           end
       }.freeze
     rescue KeyError, ArgumentError, TypeError
@@ -167,20 +167,16 @@ module DiscussionBridgeGhost
         offset = state.fetch("offsets").fetch(kind)
         items = state.fetch("items").fetch(kind)
         fields = kind == "authors" ? %w[id name status] : %w[id name slug]
-        unless offset.is_a?(Integer) && (0..ids(kind).length).cover?(offset) &&
-                 items.is_a?(Array) && items.length == offset &&
-                 items.all? { |item|
-                   item.is_a?(Hash) && item.keys.sort == fields.sort &&
-                     fields.all? { |field| item[field].is_a?(String) } &&
-                     (
-                       kind != "taxonomy" ||
-                         !automation_tag?(item.fetch("name"))
-                     )
-                 } &&
-                 items.map { |item| item.fetch("id") } ==
-                   ids(kind).first(offset)
-          raise Error.new("identity_conflict")
-        end
+        valid_items =
+          offset.is_a?(Integer) && (0..ids(kind).length).cover?(offset) &&
+            items.is_a?(Array) && items.length == offset &&
+            items.all? do |item|
+              item.is_a?(Hash) && item.keys.sort == fields.sort &&
+                fields.all? { |field| item[field].is_a?(String) } &&
+                (kind != "taxonomy" || !automation_tag?(item.fetch("name")))
+            end &&
+            items.map { |item| item.fetch("id") } == ids(kind).first(offset)
+        raise Error.new("identity_conflict") unless valid_items
       end
       state
     rescue KeyError, ArgumentError, TypeError
@@ -189,9 +185,10 @@ module DiscussionBridgeGhost
 
     def commit(before, after)
       @context.commit do
-        unless read == before || (before == initial_state && read.nil?)
-          raise Error.new("identity_conflict")
-        end
+        observed = read
+        matches =
+          observed == before || (before == initial_state && observed.nil?)
+        raise Error.new("identity_conflict") unless matches
         saved =
           row ||
             @installation.operational_records.build(
@@ -215,10 +212,26 @@ module DiscussionBridgeGhost
     end
 
     def mutable(value)
-      NativeDocument.parse(
-        JSON.generate(value),
-        maximum_bytes: NativeCommandJournal::MAXIMUM_BYTES
+      plain_value(
+        NativeDocument.parse(
+          JSON.generate(value),
+          maximum_bytes: NativeCommandJournal::MAXIMUM_BYTES
+        )
       )
+    end
+
+    # The validating decoder deliberately rejects duplicate assignments. Its
+    # StrictObject is not a mutable checkpoint: copy the already-validated tree
+    # into ordinary hashes before advancing offsets. Never weaken the decoder.
+    def plain_value(value)
+      case value
+      when Hash
+        value.to_h { |key, member| [key, plain_value(member)] }
+      when Array
+        value.map { |member| plain_value(member) }
+      else
+        value
+      end
     end
 
     def snapshot(value)
