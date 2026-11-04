@@ -1004,17 +1004,35 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       expect { held.native_management!(stage: "withdraw") }.to raise_error(
         DiscussionBridgeGhost::Error
       )
-      # Deliberately malformed synthetic configuration change without a new
-      # revision: comparing the full retained policy still catches the drift.
+      # A real policy/scope change invalidates the old authority. It must not
+      # manufacture a fresh descriptor under the earlier leased work either.
       config.fetch("policy")["author_ids"] = []
       config.fetch("policy")["taxonomy_ids"] = ["3" * 24]
+      config.fetch("policy")["policy_revision"] = SecureRandom.uuid
       @connection.update_columns(cms_configuration: config)
       expect {
         held.guard!(operation: :mutate, management: current)
       }.to raise_error(DiscussionBridgeGhost::Error)
-      released = held.native_management!(stage: "publish")
-      expect(released.released_relations).to eq(["authors"])
+      expect { held.native_management!(stage: "publish") }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
       expect(current.value.fetch("author_ids")).to eq(["1" * 24])
+      # The receiver's actual intent path supersedes old work and creates a new
+      # policy-bound lease; the test does not rebase the old checkpoint.
+      @work =
+        DiscussionBridge::CmsWorkCoordinator.new(@connection).enqueue!(
+          @mapping,
+          source_snapshot: @snapshot
+        )
+    end
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations, key: "claim:field-release-policy")
+      released =
+        authority(context, mutations, lease).native_management!(
+          stage: "publish"
+        )
+      expect(released.released_relations).to eq(["authors"])
+      expect(released.value.fetch("taxonomy_ids")).to eq(["3" * 24])
     end
     expect(a_request(:any, /ghost-authority-/)).not_to have_been_made
   end
