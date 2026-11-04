@@ -47,7 +47,13 @@ after_initialize do
     owned_lexical
     work_authority
   ].each { |name| require_relative "lib/discussion_bridge_ghost/#{name}" }
-  %w[native_target installation operational_record mutation].each do |name|
+  %w[
+    native_target
+    installation
+    operational_record
+    mutation
+    history_guard
+  ].each do |name|
     require_relative "app/models/discussion_bridge_ghost/#{name}"
   end
 end

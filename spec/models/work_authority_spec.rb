@@ -142,6 +142,9 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       DiscussionBridgeGhost::Mutation.where(
         installation_id: @installation.id
       ).delete_all
+      DiscussionBridgeGhost::HistoryGuard.where(
+        installation_id: @installation.id
+      ).delete_all
       @installation.delete
     end
     @target.delete if @target&.persisted?
@@ -1478,7 +1481,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       expect(
         @installation
           .operational_records
-          .where(kind: "policy_history_verified")
+          .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::VERIFIED)
           .count
       ).to eq(0)
     end
@@ -1535,7 +1538,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       expect(
         @installation
           .operational_records
-          .where(kind: "policy_history_verified")
+          .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::VERIFIED)
           .count
       ).to eq(1)
       before = @field_control_native
@@ -1559,12 +1562,327 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         field_control_ownership(context, commands, held).capture
       }.to raise_error(DiscussionBridgeGhost::Error)
       page.update!(encrypted_payload: original)
+      # Restoring bytes cannot reset a mutation token or resurrect an old proof.
+      expect {
+        field_control_ownership(context, commands, held).capture
+      }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+    with_runtime do |context, mutations|
+      held = authority(context, mutations, lease)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      intake =
+        DiscussionBridgeGhost::PolicyHistoryIntake.new(
+          context: context,
+          authority: held,
+          baseline: baseline
+        )
+      expect(intake.verify_next).to eq("complete" => false, "pages" => 1)
+      expect(intake.verify_next).to eq("complete" => true, "pages" => 2)
       field_control_ownership(context, commands, held).capture
     end
     expect(a_request(:post, %r{/ghost/api/admin/posts/})).to have_been_made.once
     expect(
       a_request(:put, %r{/ghost/api/admin/posts/})
     ).to have_been_made.times(1)
+  end
+
+  def offline_history_fixture
+    field_control_catalogs!
+    audited_field_control_policy!(authors: ["1" * 24], taxonomy: ["3" * 24])
+    baseline = nil
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations, key: "claim:guarded-history-base")
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      baseline =
+        DiscussionBridgeGhost::NativeBaselineJournal.new(
+          context: context,
+          journal: commands
+        ).current(@mapping.mapping_id)
+    end
+    audited_field_control_policy!(authors: [], taxonomy: [])
+    field_control_edit!("authors", "9" * 24)
+    field_control_edit!("taxonomy", "8" * 24)
+    42.times do |index|
+      audited_field_control_policy!(
+        authors: [(index.even? ? "1" : "2") * 24],
+        taxonomy: ["4" * 24]
+      )
+    end
+    lease = nil
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations, key: "claim:guarded-history")
+    end
+    [baseline, lease]
+  end
+
+  def finish_policy_history(baseline, lease, app: Rails.application)
+    3.times do
+      with_runtime(app: app) do |context, mutations|
+        intake =
+          DiscussionBridgeGhost::PolicyHistoryIntake.new(
+            context: context,
+            authority: authority(context, mutations, lease),
+            baseline: baseline
+          )
+        intake.advance
+      end
+    end
+    3.times do
+      with_runtime(app: app) do |context, mutations|
+        intake =
+          DiscussionBridgeGhost::PolicyHistoryIntake.new(
+            context: context,
+            authority: authority(context, mutations, lease),
+            baseline: baseline
+          )
+        intake.verify_next
+      end
+    end
+  end
+
+  %w[
+    missing_middle
+    missing_final
+    corrupt_middle
+    corrupt_final
+    lost_sighting
+    missing_guard
+  ].each do |failure|
+    it "refuses completed release evidence after #{failure}, across a process restart" do
+      baseline, lease = offline_history_fixture
+      finish_policy_history(baseline, lease)
+      pages =
+        @installation
+          .operational_records
+          .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::PAGE)
+          .order(:record_key)
+          .to_a
+      expect(pages.length).to eq(3)
+      proof =
+        @installation.operational_records.find_by!(
+          kind: DiscussionBridgeGhost::PolicyHistoryIntake::VERIFIED
+        )
+      original_proof = proof.encrypted_payload
+      case failure
+      when "missing_middle"
+        pages[1].destroy!
+      when "missing_final"
+        pages[2].class.where(id: pages[2].id).delete_all
+      when "corrupt_middle"
+        pages[1]
+          .class
+          .where(id: pages[1].id)
+          .update_all(encrypted_payload: "corrupt")
+      when "corrupt_final"
+        pages[2].class.connection.execute(
+          "UPDATE discussion_bridge_ghost_records SET encrypted_payload = 'corrupt' WHERE id = #{pages[2].id}"
+        )
+      when "lost_sighting"
+        @installation
+          .operational_records
+          .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::REVISION)
+          .order(:id)
+          .first
+          .destroy!
+      when "missing_guard"
+        DiscussionBridgeGhost::HistoryGuard.where(
+          installation_id: @installation.id
+        ).delete_all
+      end
+      receipts =
+        DiscussionBridgeCmsMutationReceipt.where(
+          content_connection_id: @connection.id
+        ).count
+      with_runtime do |context, mutations|
+        commands =
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+        held = authority(context, mutations, lease)
+        expect {
+          baseline.released_relations(
+            journal: commands,
+            through_generation: lease.fetch("lease_generation")
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        expect {
+          field_control_ownership(context, commands, held).capture
+        }.to raise_error(DiscussionBridgeGhost::Error)
+      end
+      expect(proof.reload.encrypted_payload).to eq(original_proof)
+      expect(
+        DiscussionBridgeCmsMutationReceipt.where(
+          content_connection_id: @connection.id
+        ).count
+      ).to eq(receipts)
+      expect(
+        a_request(:post, %r{/ghost/api/admin/posts/})
+      ).to have_been_made.once
+      expect(
+        a_request(:put, %r{/ghost/api/admin/posts/})
+      ).to have_been_made.once
+    end
+  end
+
+  it "carries history guards beyond release lookup into ownership and pre-write execution checks" do
+    baseline, lease = offline_history_fixture
+    finish_policy_history(baseline, lease)
+    with_runtime do |context, mutations|
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      expect(
+        baseline.released_relations(
+          journal: commands,
+          through_generation: lease.fetch("lease_generation")
+        ).sort
+      ).to eq(%w[authors taxonomy])
+      @installation
+        .operational_records
+        .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::PAGE)
+        .order(:id)
+        .last
+        .destroy!
+      expect { context.assert! }.to raise_error(DiscussionBridgeGhost::Error)
+      expect {
+        context.commit { raise "must not enter commit" }
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect {
+        authority(context, mutations, lease).guard!(operation: :mutate)
+      }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+  end
+
+  %w[count bytes].each do |boundary|
+    it "refuses cross-page revision reuse at a #{boundary} boundary after verification restart" do
+      baseline, lease = offline_history_fixture
+      events = []
+      after_revision = baseline.value.fetch("content_policy_revision")
+      through_revision =
+        @connection.reload.cms_configuration.dig("policy", "policy_revision")
+      with_runtime do |context, _mutations|
+        cursor = after_revision
+        3.times do
+          result =
+            context.read(
+              "V4-37",
+              query: {
+                "after_policy_revision" => cursor,
+                "through_policy_revision" => through_revision
+              }
+            )
+          body = JSON.parse(JSON.generate(result.value))
+          events.concat(body.fetch("items"))
+          cursor = body.fetch("next_policy_revision")
+        end
+        expect(cursor).to eq(nil)
+      end
+      # Deliberately faulty authenticated history transport. The normal receiver
+      # now refuses this ambiguity; this independently tests the Ghost consumer
+      # with the real Rack transport, wire codec, leases, database and AEAD.
+      if boundary == "bytes"
+        ids = 1000.times.map { |index| index.to_s(16).rjust(24, "0") }
+        events.drop(1).each { |event| event["author_ids"] = ids }
+      end
+      pages = []
+      cursor = after_revision
+      items = []
+      envelope =
+        lambda do |batch, next_revision|
+          {
+            "connection_id" => @connection.public_id,
+            "after_policy_revision" => cursor,
+            "through_policy_revision" => through_revision,
+            "items" => batch,
+            "next_policy_revision" => next_revision
+          }
+        end
+      events.each do |event|
+        candidate = items + [event]
+        if !items.empty? &&
+             (
+               candidate.length > 20 ||
+                 JSON.generate(
+                   envelope.call(candidate, event.fetch("policy_revision"))
+                 ).bytesize > 262_144
+             )
+          pages << envelope.call(items, items.last.fetch("policy_revision"))
+          cursor = items.last.fetch("policy_revision")
+          items = []
+        end
+        items << event
+      end
+      pages << envelope.call(items, nil)
+      expect(pages.first.fetch("items").length).to eq(20) if boundary == "count"
+      if boundary == "bytes"
+        expect(pages.first.fetch("items").length).to be < 20
+      end
+      duplicate = pages.first.fetch("items").first.fetch("policy_revision")
+      pages[1].fetch("items")[0]["policy_revision"] = duplicate
+      pages[1].fetch("items")[0]["author_ids"] = []
+      pages[1].fetch("items")[1]["previous_policy_revision"] = duplicate
+      by_cursor =
+        pages.to_h { |page| [page.fetch("after_policy_revision"), page] }
+      app =
+        lambda do |env|
+          if env.fetch("PATH_INFO") ==
+               "/discussion-bridge/v4/policy-history.json"
+            query = URI.decode_www_form(env.fetch("QUERY_STRING")).to_h
+            body =
+              JSON.generate(
+                by_cursor.fetch(query.fetch("after_policy_revision"))
+              )
+            expect(body.bytesize).to be <= 262_144
+            [200, { "content-type" => "application/json" }, [body]]
+          else
+            Rails.application.call(env)
+          end
+        end
+      pages.length.times do
+        with_runtime(app: app) do |context, mutations|
+          intake =
+            DiscussionBridgeGhost::PolicyHistoryIntake.new(
+              context: context,
+              authority: authority(context, mutations, lease),
+              baseline: baseline
+            )
+          intake.advance
+        end
+      end
+      with_runtime(app: app) do |context, mutations|
+        intake =
+          DiscussionBridgeGhost::PolicyHistoryIntake.new(
+            context: context,
+            authority: authority(context, mutations, lease),
+            baseline: baseline
+          )
+        expect(intake.verify_next).to eq("complete" => false, "pages" => 1)
+      end
+      with_runtime(app: app) do |context, mutations|
+        intake =
+          DiscussionBridgeGhost::PolicyHistoryIntake.new(
+            context: context,
+            authority: authority(context, mutations, lease),
+            baseline: baseline
+          )
+        expect { intake.verify_next }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+      end
+      expect(
+        @installation
+          .operational_records
+          .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::VERIFIED)
+          .count
+      ).to eq(0)
+      expect(
+        a_request(:post, %r{/ghost/api/admin/posts/})
+      ).to have_been_made.once
+      expect(
+        a_request(:put, %r{/ghost/api/admin/posts/})
+      ).to have_been_made.once
+    end
   end
 
   it "does not turn an unrelated offline policy change into a field release" do

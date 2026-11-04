@@ -14,8 +14,10 @@ module DiscussionBridgeGhost
 
     ENTRY = "policy_history_intake"
     PAGE = "policy_history_page"
-    VERIFICATION = "policy_history_verification"
-    VERIFIED = "policy_history_verified"
+    # Prior proof formats remain historical; never promote or fall back to them.
+    VERIFICATION = "policy_history_verification_v2"
+    VERIFIED = "policy_history_verified_v2"
+    REVISION = "policy_history_revision_v2"
     FIELDS = %w[
       format
       binding
@@ -139,11 +141,13 @@ module DiscussionBridgeGhost
       if downloaded.fetch("pages").zero?
         return { "complete" => true, "pages" => 0 }.freeze
       end
-      prior_row = row(VERIFICATION, @key)
+      @raw_guard = guard_revision!("pages:#{@key}")
+      @verification_key = "#{@key}:#{@raw_guard}"
+      prior_row = row(VERIFICATION, @verification_key)
       prior = prior_row&.private_payload
       verified = prior || initial_verification
       validate_verification!(verified, downloaded)
-      if (completed = row(VERIFIED, @key))
+      if (completed = row(VERIFIED, @verification_key))
         unless completed.private_payload == verified &&
                  verified.fetch("pages") == downloaded.fetch("pages") &&
                  verified.fetch("cursor") == @through &&
@@ -179,20 +183,44 @@ module DiscussionBridgeGhost
       end
       current!
       @context.commit do
-        existing = row(VERIFICATION, @key)
+        guard_revision!("pages:#{@key}", expected: @raw_guard, lock: true)
+        revision_guard = "revisions:#{@verification_key}"
+        token =
+          guard_revision!(
+            revision_guard,
+            expected: verified.fetch("revision_guard"),
+            lock: true,
+            missing: verified.fetch("pages").zero?
+          )
+        if verified.fetch("pages").zero? && token
+          raise Error.new("identity_conflict")
+        end
+        existing = row(VERIFICATION, @verification_key)
         unless existing&.private_payload == prior
           raise Error.new("identity_conflict")
         end
+        # Anchor/event sightings and progress commit atomically. Their own
+        # mutation guard prevents lost sightings resetting uniqueness memory.
+        remember_revision!(@after, 0) if verified.fetch("pages").zero?
+        page
+          .fetch("body")
+          .fetch("items")
+          .each do |event|
+            remember_revision!(event.fetch("policy_revision"), ordinal)
+          end
+        after["revision_guard"] = guard_revision!(revision_guard, lock: true)
         if existing
           existing.update!(
-            encrypted_payload: encrypt(VERIFICATION, @key, after)
+            encrypted_payload: encrypt(VERIFICATION, @verification_key, after)
           )
         else
-          create(VERIFICATION, @key, after)
+          create(VERIFICATION, @verification_key, after)
         end
         if complete
-          raise Error.new("identity_conflict") if row(VERIFIED, @key)
-          create(VERIFIED, @key, after)
+          if row(VERIFIED, @verification_key)
+            raise Error.new("identity_conflict")
+          end
+          create(VERIFIED, @verification_key, after)
         end
       end
       current!
@@ -201,8 +229,9 @@ module DiscussionBridgeGhost
       raise Error.new("identity_conflict"), cause: nil
     end
 
-    # Historical facts only. Look up at most one completed interval plus its
-    # two actual clear witnesses, never use an in-progress aggregate as proof.
+    # Indexed guards keep all retained dependencies live without an unbounded
+    # byte rescan. Bracket witness reads and retain tokens through subsequent
+    # ownership/pre-write checks. Neither partial nor legacy proof is usable.
     def self.released_relations(
       context:,
       identity:,
@@ -230,8 +259,8 @@ module DiscussionBridgeGhost
           .where(kind: VERIFIED, mapping_public_id: mapping)
           .where(
             "record_key > ? AND record_key <= ?",
-            prefix + after_generation.to_s.rjust(16, "0"),
-            prefix + through_generation.to_s.rjust(16, "0")
+            prefix + after_generation.to_s.rjust(16, "0") + ":~",
+            prefix + through_generation.to_s.rjust(16, "0") + ":~"
           )
       if before_record_id
         unless before_record_id.is_a?(Integer) && before_record_id.positive?
@@ -239,7 +268,7 @@ module DiscussionBridgeGhost
         end
         scope = scope.where("id < ?", before_record_id)
       end
-      record = scope.order(record_key: :desc).first
+      record = scope.order(id: :desc).first
       return [] unless record
       proof = record.private_payload
       unless proof.is_a?(Hash) &&
@@ -251,11 +280,13 @@ module DiscussionBridgeGhost
                    format
                    mapping
                    pages
+                   raw_guard
                    releases
+                   revision_guard
                    sha256
                    work
                  ] &&
-               proof.fetch("format") == "ghost-policy-history-verification-1" &&
+               proof.fetch("format") == "ghost-policy-history-verification-2" &&
                proof.fetch("binding") == context.binding &&
                proof.fetch("after_policy_revision") == after_revision &&
                proof.fetch("mapping").slice(
@@ -280,9 +311,24 @@ module DiscussionBridgeGhost
       protocol.validate!("PositiveUInt", generation)
       unless generation > after_generation &&
                generation <= through_generation &&
-               record.record_key == prefix + generation.to_s.rjust(16, "0")
+               proof.fetch("raw_guard").is_a?(String) &&
+               SecretEnvelope::UUID.match?(proof.fetch("raw_guard")) &&
+               proof.fetch("revision_guard").is_a?(String) &&
+               SecretEnvelope::UUID.match?(proof.fetch("revision_guard")) &&
+               record.record_key ==
+                 prefix + generation.to_s.rjust(16, "0") +
+                   ":#{proof.fetch("raw_guard")}"
         raise Error.new("identity_conflict")
       end
+      intake_key = prefix + generation.to_s.rjust(16, "0")
+      context.retain_history_guard!(
+        "pages:#{intake_key}",
+        proof.fetch("raw_guard")
+      )
+      context.retain_history_guard!(
+        "revisions:#{record.record_key}",
+        proof.fetch("revision_guard")
+      )
       proof
         .fetch("releases")
         .each do |relation, witness|
@@ -292,8 +338,7 @@ module DiscussionBridgeGhost
                    witness.fetch("ordinal").between?(1, proof.fetch("pages"))
             raise Error.new("identity_conflict")
           end
-          key =
-            "#{record.record_key}:#{witness.fetch("ordinal").to_s.rjust(16, "0")}"
+          key = "#{intake_key}:#{witness.fetch("ordinal").to_s.rjust(16, "0")}"
           page_row =
             context.installation.operational_records.find_by(
               kind: PAGE,
@@ -305,7 +350,7 @@ module DiscussionBridgeGhost
                    Digest::SHA256.hexdigest(JSON.generate(page)) ==
                      witness.fetch("sha256") &&
                    page.fetch("binding") == context.binding &&
-                   page.fetch("intake_key") == record.record_key &&
+                   page.fetch("intake_key") == intake_key &&
                    page.fetch("ordinal") == witness.fetch("ordinal")
             raise Error.new("identity_conflict")
           end
@@ -375,12 +420,14 @@ module DiscussionBridgeGhost
 
     def initial_verification
       {
-        "format" => "ghost-policy-history-verification-1",
+        "format" => "ghost-policy-history-verification-2",
         "binding" => @context.binding,
         "mapping" => @mapping,
         "work" => @work,
         "after_policy_revision" => @after,
         "pages" => 0,
+        "raw_guard" => @raw_guard,
+        "revision_guard" => nil,
         "sha256" => nil,
         "cursor" => @after,
         "releases" => {
@@ -413,6 +460,16 @@ module DiscussionBridgeGhost
       if state.fetch("pages").zero?
         raise Error.new("identity_conflict") unless state == expected
       else
+        unless state.fetch("raw_guard") == @raw_guard &&
+                 state.fetch("revision_guard").is_a?(String) &&
+                 SecretEnvelope::UUID.match?(state.fetch("revision_guard"))
+          raise Error.new("identity_conflict")
+        end
+        guard_revision!("pages:#{@key}", expected: state.fetch("raw_guard"))
+        guard_revision!(
+          "revisions:#{@verification_key}",
+          expected: state.fetch("revision_guard")
+        )
         page = verified_page(state.fetch("pages"))
         expected_cursor = page.dig("body", "next_policy_revision") || @through
         unless Digest::SHA256.hexdigest(JSON.generate(page)) ==
@@ -528,6 +585,32 @@ module DiscussionBridgeGhost
 
     def row(kind, key)
       @installation.operational_records.find_by(kind: kind, record_key: key)
+    end
+
+    def guard_revision!(key, expected: nil, lock: false, missing: false)
+      HistoryGuard.revision!(
+        installation_id: @installation.id,
+        key: key,
+        expected: expected,
+        lock: lock,
+        missing: missing
+      )
+    end
+
+    def remember_revision!(revision, ordinal)
+      key = "#{@verification_key}:#{Digest::SHA256.hexdigest(revision)}"
+      raise Error.new("identity_conflict") if row(REVISION, key)
+      create(
+        REVISION,
+        key,
+        {
+          "format" => "ghost-policy-history-revision-2",
+          "binding" => @context.binding,
+          "verification_key" => @verification_key,
+          "revision" => revision,
+          "ordinal" => ordinal
+        }
+      )
     end
 
     def encrypt(kind, key, value)

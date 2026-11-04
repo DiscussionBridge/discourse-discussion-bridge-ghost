@@ -30,6 +30,7 @@ module DiscussionBridgeGhost
       @binding = current_binding
       # Per-run transport attribution, not a historical binding or wire field.
       @execution_id = SecureRandom.uuid.freeze
+      @history_guards = {}
     end
 
     def bound_to?(installation:, protocol:, transport:, lease:)
@@ -44,7 +45,21 @@ module DiscussionBridgeGhost
                current_binding == @binding
         raise Error.new("identity_conflict")
       end
+      assert_history_guards!
       true
+    end
+
+    # A release proof remains a dependency through the native HTTP guards and
+    # local receipt commits, not just when its witness was first looked up.
+    def retain_history_guard!(key, revision)
+      unless key.is_a?(String) && revision.is_a?(String) &&
+               SecretEnvelope::UUID.match?(revision)
+        raise Error.new("identity_conflict")
+      end
+      prior = @history_guards[key]
+      raise Error.new("identity_conflict") if prior && prior != revision
+      @history_guards[key.dup.freeze] = revision.dup.freeze
+      assert!
     end
 
     def outside_transaction!
@@ -72,11 +87,23 @@ module DiscussionBridgeGhost
       outside_transaction!
       @installation.with_lock do
         assert!
+        assert_history_guards!(lock: true)
         yield
       end
     end
 
     private
+
+    def assert_history_guards!(lock: false)
+      @history_guards.sort.each do |key, revision|
+        HistoryGuard.revision!(
+          installation_id: @installation.id,
+          key: key,
+          expected: revision,
+          lock: lock
+        )
+      end
+    end
 
     def current_binding
       target = @installation.native_target.reload
