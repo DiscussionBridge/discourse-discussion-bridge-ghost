@@ -2166,6 +2166,131 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     end
   end
 
+  [true, false].each do |completed_locally|
+    it "resolves a #{completed_locally ? "completed" : "interrupted"} synchronized acknowledgement after the same work has a newer lease generation" do
+      native_stage_source_policy!
+      with_runtime do |context, mutations|
+        native_stage_source(context)
+        lease = claim(context, mutations)
+        held = authority(context, mutations, lease)
+        field_control_initial_publication(context, lease, held, complete: true)
+        stages =
+          native_acknowledgements(
+            context,
+            mutations,
+            DiscussionBridgeGhost::NativeCommandJournal.new(context: context),
+            held,
+            lease
+          )
+        unless completed_locally
+          original = mutations.method(:retain_response)
+          allow(mutations).to receive(
+            :retain_response
+          ) do |operation, packet, result|
+            if packet.route_id == "V4-16"
+              raise "Synthetic after-response interruption"
+            end
+            original.call(operation, packet, result)
+          end
+        end
+        if completed_locally
+          expect(
+            stages.synchronize(event_id: @native_event_id).result.status
+          ).to eq(200)
+        else
+          expect {
+            stages.synchronize(event_id: @native_event_id)
+          }.to raise_error(
+            RuntimeError,
+            "Synthetic after-response interruption"
+          )
+          allow(mutations).to receive(:retain_response).and_call_original
+        end
+        original_intent =
+          @installation
+            .operational_records
+            .find_by!(
+              kind: DiscussionBridgeGhost::NativeAcknowledgements::ENTRY
+            )
+            .encrypted_payload
+        failure =
+          mutations.call(
+            "fail:after-sync",
+            "V4-17",
+            path: {
+              "work_id" => lease.dig("work", "work_id")
+            }
+          ) do
+            {
+              "mutation_id" => SecureRandom.uuid,
+              "authority" =>
+                lease
+                  .fetch("work")
+                  .slice(
+                    "work_id",
+                    "lease_generation",
+                    "source_revision",
+                    "policy_revision"
+                  )
+                  .merge("lease_token" => lease.fetch("lease_token")),
+              "code" => "transport_timeout",
+              "native_change_applied" => true,
+              "safe_detail" => nil,
+              "retry_after_seconds" => nil
+            }
+          end
+        expect(failure.status).to eq(200)
+        freeze_time(Time.current + 31.seconds)
+        current = claim(context, mutations, key: "claim:after-sync-failure")
+        expect(current.dig("work", "work_id")).to eq(
+          lease.dig("work", "work_id")
+        )
+        expect(current.fetch("lease_generation")).to be >
+          lease.fetch("lease_generation")
+        replay = stages.synchronize(event_id: @native_event_id)
+        expect(replay.historical).to eq(true)
+        expect(replay.result.value.dig("work", "lease_generation")).to eq(
+          lease.fetch("lease_generation")
+        )
+        expect(replay.observed.dig("work", "lease_generation")).to eq(
+          current.fetch("lease_generation")
+        )
+        expect(replay.observed.dig("work", "state")).to eq("leased")
+        expect { stages.verify(event_id: @native_event_id) }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+        expect(
+          @installation
+            .operational_records
+            .find_by!(
+              kind: DiscussionBridgeGhost::NativeAcknowledgements::ENTRY
+            )
+            .encrypted_payload
+        ).to eq(original_intent)
+        expect(
+          DiscussionBridgeCmsMutationReceipt.where(
+            content_connection_id: @connection.id,
+            route: "acknowledge",
+            path_resource: @work.work_id
+          ).count
+        ).to eq(1)
+      end
+      expect(a_request(:get, @binding.canonical_url)).not_to have_been_made
+      expect(
+        a_request(
+          :post,
+          %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+        )
+      ).to have_been_made.once
+      expect(
+        a_request(
+          :put,
+          %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+        )
+      ).to have_been_made.once
+    end
+  end
+
   it "resolves an old synchronized acknowledgement as history without granting a superseded lease verification" do
     native_stage_source_policy!
     with_runtime do |context, mutations|

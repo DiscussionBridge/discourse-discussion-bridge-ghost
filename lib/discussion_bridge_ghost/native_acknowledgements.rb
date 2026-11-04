@@ -86,17 +86,25 @@ module DiscussionBridgeGhost
       @context.assert!
       previous = retained(stage)
       observed = query
-      unless observed.fetch("work").slice(*WorkAuthority::WORK_FIELDS) ==
-               @identity
+      observed_identity =
+        observed.fetch("work").slice(*WorkAuthority::WORK_FIELDS)
+      retry_fields = %w[attempt_cycle attempt lease_generation]
+      unless observed_identity.except(*retry_fields) ==
+               @identity.except(*retry_fields)
         raise Error.new("identity_conflict")
       end
-      if previous && observed.dig("work", "state") != STAGES.fetch(stage)
+      if previous &&
+           (
+             observed_identity != @identity ||
+               observed.dig("work", "state") != STAGES.fetch(stage)
+           )
         # Resolve ONLY the original request through the receiver's idempotency
         # journal. This is history, not permission to verify/write anything new.
         result = dispatch(stage, previous)
         return Outcome.new(result: result, observed: query, historical: true)
       end
-      unless observed.dig("work", "state") == STAGES.fetch(stage)
+      unless observed_identity == @identity &&
+               observed.dig("work", "state") == STAGES.fetch(stage)
         raise Error.new("work_authority_unavailable")
       end
       sync = nil
