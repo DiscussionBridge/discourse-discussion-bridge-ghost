@@ -226,7 +226,7 @@ module DiscussionBridgeGhost
     def plain_value(value)
       case value
       when Hash
-        value.to_h { |key, member| [key, plain_value(member)] }
+        value.transform_values { |member| plain_value(member) }
       when Array
         value.map { |member| plain_value(member) }
       else
