@@ -196,10 +196,9 @@ module DiscussionBridgeGhost
       next_cursor, checkpoint =
         page.values_at("next_cursor", "checkpoint_cursor")
       if page.fetch("stream") == "initial"
-        unless (next_cursor.nil? && checkpoint) ||
-                 (next_cursor && checkpoint.nil?)
-          raise Error.new("identity_conflict")
-        end
+        valid_continuation =
+          (next_cursor.nil? && checkpoint) || (next_cursor && checkpoint.nil?)
+        raise Error.new("identity_conflict") unless valid_continuation
         previous = state.fetch("last_source_id")
         page
           .fetch("items")
@@ -277,20 +276,19 @@ module DiscussionBridgeGhost
         return { "offset" => 0, "complete" => false, "chunks" => 0 }
       end
       progress = retained.fetch("progress")
-      unless retained.fetch("source_key") == key &&
-               progress.keys.sort == %w[chunks complete offset] &&
-               [true, false].include?(progress["complete"]) &&
-               progress["offset"].is_a?(Integer) &&
-               (0..metadata.fetch("content_bytes")).cover?(
-                 progress["offset"]
-               ) && progress["chunks"].is_a?(Integer) &&
-               (1..MAXIMUM_CHUNKS).cover?(progress["chunks"]) &&
-               (
-                 !progress["complete"] ||
-                   progress["offset"] == metadata.fetch("content_bytes")
-               )
-        raise Error.new("identity_conflict")
-      end
+      valid_progress =
+        retained.fetch("source_key") == key &&
+          progress.keys.sort == %w[chunks complete offset] &&
+          [true, false].include?(progress["complete"]) &&
+          progress["offset"].is_a?(Integer) &&
+          (0..metadata.fetch("content_bytes")).cover?(progress["offset"]) &&
+          progress["chunks"].is_a?(Integer) &&
+          (1..MAXIMUM_CHUNKS).cover?(progress["chunks"]) &&
+          (
+            !progress["complete"] ||
+              progress["offset"] == metadata.fetch("content_bytes")
+          )
+      raise Error.new("identity_conflict") unless valid_progress
       progress
     end
 
