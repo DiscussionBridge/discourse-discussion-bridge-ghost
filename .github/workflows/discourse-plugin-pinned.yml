@@ -265,7 +265,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: DiscussionBridge/discourse-discussion-bridge
-          ref: 4d092ac26f9e3d13a9d6f6b3dfb939a1d1d71619
+          ref: 43be31be616b397c21786f74366e0a1c76b8f667
           path: plugins/discourse-discussion-bridge
           fetch-depth: 1
           persist-credentials: false
@@ -277,7 +277,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_CORE"
           test "$(git -C "plugins/$PLUGIN_NAME" rev-parse HEAD)" = "$EXPECTED_CONNECTOR"
-          test "$(git -C plugins/discourse-discussion-bridge rev-parse HEAD)" = "4d092ac26f9e3d13a9d6f6b3dfb939a1d1d71619"
+          test "$(git -C plugins/discourse-discussion-bridge rev-parse HEAD)" = "43be31be616b397c21786f74366e0a1c76b8f667"
 
       - name: Setup Git
         run: |
