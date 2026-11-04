@@ -56,6 +56,7 @@ end
 #
 # Indexes
 #
+#  idx_db_ghost_history_proof      (installation_id, kind, mapping_public_id, split_part(record_key, ':'::text, 2), split_part(record_key, ':'::text, 3) COLLATE "C" DESC, id DESC) WHERE ((kind)::text = 'policy_history_verified_v2'::text)
 #  idx_db_ghost_record_assignment  (installation_id,kind,native_assignment_version)
 #  idx_db_ghost_record_guard       (installation_id,kind,native_guard_version)
 #  idx_db_ghost_record_identity    (installation_id,kind,record_key) UNIQUE

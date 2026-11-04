@@ -1648,6 +1648,16 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         intake.verify_next
       end
     end
+    with_runtime do |context, _mutations|
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      expect(
+        baseline.released_relations(
+          journal: commands,
+          through_generation: lease.fetch("lease_generation")
+        ).sort
+      ).to eq(%w[authors taxonomy])
+    end
   end
 
   it "does not reset cross-page uniqueness memory when an earlier sighting disappears" do
