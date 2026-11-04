@@ -24,3 +24,21 @@ module DiscussionBridgeGhost
     end
   end
 end
+
+# == Schema Information
+#
+# Table name: discussion_bridge_ghost_history_guards
+#
+#  id              :bigint           not null, primary key
+#  guard_key       :text             not null
+#  revision        :uuid             not null
+#  installation_id :bigint           not null
+#
+# Indexes
+#
+#  idx_db_ghost_history_guard  (installation_id,guard_key) UNIQUE
+#
+# Foreign Keys
+#
+#  fk_rails_...  (installation_id => discussion_bridge_ghost_installations.id)
+#
