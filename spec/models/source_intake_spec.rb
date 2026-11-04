@@ -408,13 +408,14 @@ RSpec.describe DiscussionBridgeGhost::SourceIntake do
 
   it "does not treat GET query support as mutation authority" do
     runtime do |_intake, context|
-      expect(context.transport).not_to receive(:execute)
+      allow(context.transport).to receive(:execute)
       expect { context.read("V4-13") }.to raise_error(
         DiscussionBridgeGhost::Error
       )
       expect {
         context.read("V4-07", query: { "unexpected" => "value" })
       }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(context.transport).not_to have_received(:execute)
       expect(
         DiscussionBridgeGhost::Mutation.where(installation_id: @installation.id)
       ).not_to exist
