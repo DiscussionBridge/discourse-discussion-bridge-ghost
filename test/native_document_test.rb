@@ -5,11 +5,44 @@ require_relative "../lib/discussion_bridge_ghost/error"
 require_relative "../lib/discussion_bridge_ghost/protected_diagnostics"
 require_relative "../lib/discussion_bridge_ghost/wire_json"
 require_relative "../lib/discussion_bridge_ghost/native_document"
+require_relative "../lib/discussion_bridge_ghost/native_metadata_selection"
 
 class GhostNativeDocumentTest < Minitest::Test
   ID = "a" * 24
   AUTHOR = "b" * 24
   TAG = "c" * 24
+
+  def test_metadata_checkpoint_copy_is_mutable_without_weakening_strict_decoding
+    parsed =
+      DiscussionBridgeGhost::NativeDocument.parse(
+        '{"offsets":{"authors":0},"items":{"authors":[{"id":"original"}]}}',
+        maximum_bytes: 1024
+      )
+    assert_raises(DiscussionBridgeGhost::Error) do
+      parsed.fetch("offsets")["authors"] = 1
+    end
+    # Isolated actual copy/snapshot methods only: no context, authority, DB or
+    # native HTTP construction/execution is implied by this portable regression.
+    helper = DiscussionBridgeGhost::NativeMetadataSelection.allocate
+    copy = helper.send(:mutable, parsed)
+    assert_instance_of Hash, copy
+    assert_instance_of Hash, copy.fetch("offsets")
+    copy.fetch("offsets")["authors"] = 1
+    copy.fetch("items").fetch("authors").first["id"] = "changed"
+    assert_equal 0, parsed.dig("offsets", "authors")
+    assert_equal "original", parsed.dig("items", "authors", 0, "id")
+    sealed = helper.send(:snapshot, copy)
+    assert sealed.frozen?
+    assert sealed.fetch("offsets").frozen?
+    assert sealed.dig("items", "authors", 0, "id").frozen?
+    assert_raises(FrozenError) { sealed.fetch("offsets")["authors"] = 2 }
+    assert_raises(DiscussionBridgeGhost::Error) do
+      DiscussionBridgeGhost::NativeDocument.parse(
+        '{"x":1,"x":2}',
+        maximum_bytes: 1024
+      )
+    end
+  end
 
   def setup
     @baseline = {
