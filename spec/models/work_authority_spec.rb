@@ -7,6 +7,7 @@ require_relative "../../lib/discussion_bridge_ghost/native_ownership_journal"
 require_relative "../../lib/discussion_bridge_ghost/native_acknowledgements"
 require_relative "../../lib/discussion_bridge_ghost/native_metadata_selection"
 require_relative "../../lib/discussion_bridge_ghost/policy_history_intake"
+require_relative "../../lib/discussion_bridge_ghost/native_command_planner"
 
 RSpec.describe DiscussionBridgeGhost::WorkAuthority do
   self.use_transactional_tests = false
@@ -2375,6 +2376,301 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     )
     args[:request]["body_bytes"] = JSON.generate("posts" => [fields])
     args
+  end
+
+  # Synthetic Ghost HTTP, not a manually prepared command. These fixtures let
+  # the real planner derive every native request from actual retained V4 Source.
+  def planned_native_fixture(kind: "post")
+    @field_control_native = nil
+    @planned_native_writes = []
+    %w[post page].each do |type|
+      stub_request(
+        :get,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/#{type}s/\?filter=}
+      ).to_return do
+        {
+          status: 200,
+          headers: {
+            "Content-Type" => "application/json"
+          },
+          body:
+            JSON.generate(
+              "#{type}s" =>
+                (
+                  if @field_control_native && type == kind
+                    [@field_control_native]
+                  else
+                    []
+                  end
+                )
+            )
+        }
+      end
+    end
+    stub_request(
+      :post,
+      "#{@target.admin_origin}/ghost/api/admin/#{kind}s/"
+    ).to_return do |request|
+      fields = JSON.parse(request.body).fetch("#{kind}s").first
+      @planned_native_writes << fields
+      @field_control_native =
+        fields.merge(
+          "id" => "a" * 24,
+          "type" => kind,
+          "html" => planned_native_html(fields.fetch("lexical")),
+          "authors" => [{ "id" => "b" * 24 }],
+          "tags" => planned_native_tags(fields.fetch("tags")),
+          "url" => @binding.canonical_url,
+          "updated_at" => "2026-11-03T16:01:00.000Z"
+        )
+      planned_native_response(kind, 201)
+    end
+    stub_request(
+      :get,
+      %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/#{kind}s/#{"a" * 24}/}
+    ).to_return { planned_native_response(kind) }
+    stub_request(
+      :put,
+      "#{@target.admin_origin}/ghost/api/admin/#{kind}s/#{"a" * 24}/"
+    ).to_return do |request|
+      fields = JSON.parse(request.body).fetch("#{kind}s").first
+      expect(fields.fetch("updated_at")).to eq(
+        @field_control_native.fetch("updated_at")
+      )
+      @planned_native_writes << fields
+      @field_control_native =
+        @field_control_native.merge(fields).merge(
+          "html" =>
+            (
+              if fields.key?("lexical")
+                planned_native_html(fields.fetch("lexical"))
+              else
+                @field_control_native.fetch("html")
+              end
+            ),
+          "tags" =>
+            planned_native_tags(
+              fields.fetch("tags", @field_control_native.fetch("tags"))
+            ),
+          "updated_at" =>
+            (Time.iso8601(fields.fetch("updated_at")) + 1).iso8601(3)
+        )
+      planned_native_response(kind)
+    end
+  end
+
+  def planned_native_html(lexical)
+    JSON
+      .parse(lexical)
+      .fetch("root")
+      .fetch("children")
+      .filter_map { |node| node["html"] }
+      .join
+  end
+
+  def planned_native_tags(tags)
+    tags.map do |tag|
+      if tag.key?("id")
+        tag
+      else
+        tag.merge("id" => Digest::SHA256.hexdigest(tag.fetch("name"))[0, 24])
+      end
+    end
+  end
+
+  def planned_native_response(kind, status = 200)
+    {
+      status: status,
+      headers: {
+        "Content-Type" => "application/json"
+      },
+      body: JSON.generate("#{kind}s" => [@field_control_native])
+    }
+  end
+
+  def native_planner(context, commands, held)
+    DiscussionBridgeGhost::NativeCommandPlanner.new(
+      context: context,
+      commands: commands,
+      authority: held,
+      api_key: "a" * 24 + ":" + "12" * 32
+    )
+  end
+
+  def complete_planner_metadata(context, held)
+    lookup =
+      DiscussionBridgeGhost::NativeMetadataSelection.new(
+        context: context,
+        authority: held,
+        api_key: "a" * 24 + ":" + "12" * 32
+      )
+    expect(lookup.advance.fetch("complete")).to eq(true)
+    lookup.selection
+  end
+
+  %w[post page].each do |kind|
+    it "plans the complete #{kind} from actual V4 Source, executes both stages and acknowledges the same publication" do
+      native_stage_source_policy!
+      planned_native_fixture(kind: kind)
+      with_runtime do |context, mutations|
+        native_stage_source(context)
+        lease = claim(context, mutations)
+        held = authority(context, mutations, lease)
+        commands =
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+        complete_planner_metadata(context, held)
+        planner = native_planner(context, commands, held)
+        executor =
+          DiscussionBridgeGhost::NativeExecutor.new(
+            context: context,
+            journal: commands,
+            authority: held,
+            api_key: "a" * 24 + ":" + "12" * 32
+          )
+        draft =
+          planner.prepare_draft(
+            event_id: @native_event_id,
+            kind: kind,
+            slug: "article"
+          )
+        original = commands.retained(draft).fetch("command")
+        expect(
+          planner.prepare_draft(
+            event_id: @native_event_id,
+            kind: kind,
+            slug: "article"
+          )
+        ).to eq(draft)
+        expect(commands.retained(draft).fetch("command")).to eq(original)
+        expect(@planned_native_writes).to be_empty
+        expect(executor.execute(draft).fetch("native_id")).to eq("a" * 24)
+        publication = planner.prepare_publication(event_id: @native_event_id)
+        expect(publication).not_to eq(draft)
+        executor.execute(publication)
+        expect(@field_control_native.fetch("html")).to include(
+          "Synthetic native authority source."
+        )
+        expect(@field_control_native.fetch("status")).to eq("published")
+        expect(@field_control_native.fetch("authors")).to eq(
+          [{ "id" => "b" * 24 }]
+        )
+        expect(@planned_native_writes.length).to eq(2)
+        expect(
+          @planned_native_writes.all? do |fields|
+            !fields.key?("management") && !fields.key?("authors")
+          end
+        ).to eq(true)
+        expect(planner.prepare_publication(event_id: @native_event_id)).to eq(
+          publication
+        )
+        executor.execute(publication)
+        expect(@planned_native_writes.length).to eq(2)
+        stages =
+          native_acknowledgements(context, mutations, commands, held, lease)
+        synced = stages.synchronize(event_id: @native_event_id)
+        expect(synced.result.status).to eq(200)
+        expect(@mapping.reload.destination_native_id).to eq("a" * 24)
+        stub_request(:get, @binding.canonical_url).to_return(
+          status: 200,
+          headers: {
+            "Content-Type" => "text/html"
+          },
+          body:
+            "<!doctype html><html><body>#{@field_control_native.fetch("html")}</body></html>"
+        )
+        verified = stages.verify(event_id: @native_event_id)
+        expect(verified.result.status).to eq(200)
+        expect(@work.reload.state).to eq("verified")
+        expect(@planned_native_writes.length).to eq(2)
+        expect(@mapping.mapping_id).to eq(lease.dig("work", "mapping_id"))
+      end
+    end
+  end
+
+  it "resumes the exact saved native plan after a crash before command enrollment" do
+    native_stage_source_policy!
+    planned_native_fixture
+    lease = nil
+    original_plan = nil
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      complete_planner_metadata(context, held)
+      allow(commands).to receive(:prepare).and_raise(
+        DiscussionBridgeGhost::Error.new("identity_conflict")
+      )
+      expect do
+        native_planner(context, commands, held).prepare_draft(
+          event_id: @native_event_id,
+          kind: "post",
+          slug: "article"
+        )
+      end.to raise_error(DiscussionBridgeGhost::Error)
+      row =
+        @installation.operational_records.find_by!(
+          kind: DiscussionBridgeGhost::NativeCommandPlanner::ENTRY
+        )
+      original_plan = [row.encrypted_payload, row.private_payload]
+      expect(@planned_native_writes).to be_empty
+    end
+    with_runtime do |context, mutations|
+      held = authority(context, mutations, lease)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      id =
+        native_planner(context, commands, held).prepare_draft(
+          event_id: @native_event_id,
+          kind: "post",
+          slug: "article"
+        )
+      expect(id).to eq(original_plan.last.dig("arguments", "command_id"))
+      row =
+        @installation.operational_records.find_by!(
+          kind: DiscussionBridgeGhost::NativeCommandPlanner::ENTRY
+        )
+      expect(row.encrypted_payload).to eq(original_plan.first)
+      expect(commands.retained(id).fetch("command").fetch("request")).to eq(
+        original_plan.last.dig("arguments", "request")
+      )
+      expect(@planned_native_writes).to be_empty
+    end
+  end
+
+  it "refuses a native plan until every selected metadata lookup has completed" do
+    native_stage_source_policy!
+    planned_native_fixture
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      planner = native_planner(context, commands, held)
+      expect do
+        planner.prepare_draft(
+          event_id: @native_event_id,
+          kind: "post",
+          slug: "article"
+        )
+      end.to raise_error(DiscussionBridgeGhost::Error)
+      expect(
+        @installation.operational_records.where(
+          kind: DiscussionBridgeGhost::NativeCommandPlanner::ENTRY
+        )
+      ).to be_empty
+      expect(@planned_native_writes).to be_empty
+      complete_planner_metadata(context, held)
+      expect(
+        planner.prepare_draft(
+          event_id: @native_event_id,
+          kind: "post",
+          slug: "article"
+        )
+      ).to be_present
+    end
   end
 
   def native_acknowledgements(context, mutations, commands, held, lease)

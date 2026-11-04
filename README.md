@@ -83,5 +83,14 @@ recovery, current/public verification,
 coordinators, jobs and administration are still being implemented. Installing
 these unfinished components is not a functional replacement adapter.
 
+Native command planning now connects retained complete V4 Source to exact
+draft, publication and status-only withdrawal intents. It saves the plan before
+command enrollment so an interrupted local handoff can retain the same command,
+nonce, source, body and baseline. The plan is preparation, not authority or a
+native/public completion receipt. Execution and acknowledgment retain their
+separate current-authority, owned-content, native-CAS and public checks. This
+component is under development/test qualification; no controller or scheduled
+job activates it and no installed Ghost workflow is claimed.
+
 The authoritative execution order is the existing V4 completion plan; this is
 the source component, not a new product work list.
