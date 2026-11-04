@@ -138,7 +138,8 @@ module DiscussionBridgeGhost
         released =
           previous.released_relations(
             journal: @commands,
-            through_generation: command.dig("owner", "generation")
+            through_generation: command.dig("owner", "generation"),
+            before_command_id: command.fetch("command_id")
           )
         previous.assert_current!(
           command.fetch("baseline"),
@@ -336,7 +337,9 @@ module DiscussionBridgeGhost
               NativeManagedBaseline.release_history(
                 journal: @commands,
                 value: previous_value,
-                through_generation: latest.dig("command", "owner", "generation")
+                through_generation:
+                  latest.dig("command", "owner", "generation"),
+                before_command_id: latest.dig("command", "command_id")
               )
             else
               []

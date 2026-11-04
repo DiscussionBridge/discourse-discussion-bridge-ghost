@@ -1383,18 +1383,20 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     end
   end
 
-  def field_control_policy!(authors:, taxonomy:)
+  def field_control_policy!(authors:, taxonomy:, withdraw: false)
     config = @connection.reload.cms_configuration.deep_dup
     config.fetch("policy").merge!(
       "policy_revision" => SecureRandom.uuid,
       "author_ids" => authors,
-      "taxonomy_ids" => taxonomy
+      "taxonomy_ids" => taxonomy,
+      "exclude_topic_ids" => withdraw ? [@topic.id.to_s] : []
     )
     @connection.update_columns(cms_configuration: config)
     @work =
       DiscussionBridge::CmsWorkCoordinator.new(@connection).enqueue!(
         @mapping,
-        source_snapshot: @snapshot
+        source_snapshot: withdraw ? nil : @snapshot,
+        action: withdraw ? "withdraw" : "publish_revision"
       )
   end
 
@@ -1408,12 +1410,25 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     }
   end
 
-  def field_control_initial_publication(context, lease, held)
+  def field_control_initial_publication(context, lease, held, legacy: false)
     commands = DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
     args, html = native_arguments(context, lease, native_id: nil, create: true)
     fields = args.fetch(:candidate).merge("visibility" => "public")
     args[:candidate] = fields.merge(
-      "management" => held.native_management!(stage: "create_draft").value
+      "management" =>
+        DiscussionBridgeGhost::NativeManagement.for_policy(
+          protocol: context.protocol,
+          policy: @connection.reload.cms_configuration.fetch("policy"),
+          stage: "create_draft",
+          format:
+            (
+              if legacy
+                DiscussionBridgeGhost::NativeManagement::LEGACY_FORMAT
+              else
+                DiscussionBridgeGhost::NativeManagement::FORMAT
+              end
+            )
+        ).value
     )
     args[:request]["body_bytes"] = JSON.generate("posts" => [fields])
     @field_control_native = nil
@@ -1467,12 +1482,16 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     ).to_return do |request|
       applied = JSON.parse(request.body).fetch("posts").first
       rendered =
-        JSON
-          .parse(applied.fetch("lexical"))
-          .fetch("root")
-          .fetch("children")
-          .filter_map { |node| node["html"] }
-          .join
+        if applied.key?("lexical")
+          JSON
+            .parse(applied.fetch("lexical"))
+            .fetch("root")
+            .fetch("children")
+            .filter_map { |node| node["html"] }
+            .join
+        else
+          @field_control_native.fetch("html")
+        end
       updated =
         (Time.iso8601(@field_control_native.fetch("updated_at")) + 1).iso8601(3)
       @field_control_native =
@@ -1493,6 +1512,16 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     executor.execute(args.fetch(:command_id))
     publication =
       managed_publish_arguments(context, lease, @field_control_native)
+    if legacy
+      publication.fetch(:candidate)[
+        "management"
+      ] = DiscussionBridgeGhost::NativeManagement.for_policy(
+        protocol: context.protocol,
+        policy: @connection.reload.cms_configuration.fetch("policy"),
+        stage: "publish",
+        format: DiscussionBridgeGhost::NativeManagement::LEGACY_FORMAT
+      ).value
+    end
     commands.prepare(**publication)
     executor.execute(publication.fetch(:command_id))
     publication.fetch(:command_id)
@@ -1520,6 +1549,212 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     @field_control_native["updated_at"] = (
       Time.iso8601(@field_control_native.fetch("updated_at")) + 1
     ).iso8601(3)
+  end
+
+  %w[authors taxonomy].each do |relation|
+    it "preserves completed legacy withdrawal history after a later same-generation #{relation} release" do
+      field_control_catalogs!
+      field_control_policy!(authors: ["1" * 24], taxonomy: ["3" * 24])
+      original_command = withdrawal_command = release_lease = nil
+      historical_bytes = []
+      with_runtime do |context, mutations|
+        lease = claim(context, mutations, key: "claim:legacy-selected")
+        original_command =
+          field_control_initial_publication(
+            context,
+            lease,
+            authority(context, mutations, lease),
+            legacy: true
+          )
+      end
+      # Explicit synthetic receiver binding after actual local execution; this
+      # is not public verification, an ACK, or a synchronized-work assertion.
+      @mapping.update!(destination_native_id: "a" * 24)
+      field_control_policy!(
+        authors: relation == "authors" ? [] : ["1" * 24],
+        taxonomy: relation == "taxonomy" ? [] : ["3" * 24],
+        withdraw: true
+      )
+      with_runtime do |context, mutations|
+        release_lease = claim(context, mutations, key: "claim:legacy-withdraw")
+        expect(release_lease.fetch("lease_generation")).to eq(2)
+        held = authority(context, mutations, release_lease)
+        commands =
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+        args, = native_arguments(context, release_lease)
+        fields = {
+          "id" => "a" * 24,
+          "updated_at" => @field_control_native.fetch("updated_at"),
+          "status" => "draft"
+        }
+        management =
+          DiscussionBridgeGhost::NativeManagement.for_policy(
+            protocol: context.protocol,
+            policy: @connection.reload.cms_configuration.fetch("policy"),
+            stage: "withdraw",
+            format: DiscussionBridgeGhost::NativeManagement::LEGACY_FORMAT
+          )
+        expect(management.released_relations).to eq([])
+        args[:baseline] = @field_control_native
+        args[:candidate] = @field_control_native.merge(fields).merge(
+          "management" => management.value
+        )
+        args[:request]["body_bytes"] = JSON.generate("posts" => [fields])
+        withdrawal_command = args.fetch(:command_id)
+        commands.prepare(**args)
+        executor =
+          DiscussionBridgeGhost::NativeExecutor.new(
+            context: context,
+            journal: commands,
+            authority: held,
+            api_key: "a" * 24 + ":" + "12" * 32
+          )
+        executor.execute(withdrawal_command)
+        expect(
+          @installation
+            .operational_records
+            .where(kind: "native_field_release")
+            .count
+        ).to eq(0)
+        baselines =
+          DiscussionBridgeGhost::NativeBaselineJournal.new(
+            context: context,
+            journal: commands
+          )
+        baseline = baselines.current(@mapping.mapping_id)
+        expect(baseline.value.fetch(relation)).to eq(
+          relation == "authors" ? ["1" * 24] : ["3" * 24]
+        )
+        # Save original immutable command/completion/baseline bytes BEFORE the
+        # modern observer first records the cleared field, at the SAME lease.
+        historical_bytes =
+          @installation
+            .operational_records
+            .where(
+              record_key: [original_command, withdrawal_command],
+              kind: %w[native_command native_progress native_managed_baseline]
+            )
+            .order(:id)
+            .pluck(:id, :encrypted_payload)
+        ownership = field_control_ownership(context, commands, held)
+        observation = ownership.capture
+        historical_bytes +=
+          @installation
+            .operational_records
+            .where(
+              kind: "native_ownership_receipt",
+              record_key: observation.key
+            )
+            .pluck(:id, :encrypted_payload)
+        release =
+          @installation.operational_records.find_by!(
+            kind: "native_field_release"
+          )
+        expect(release.private_payload.dig("work", "lease_generation")).to eq(2)
+        expect(release.id).to be >
+          commands.preparation_record_id(withdrawal_command)
+        expect(baselines.current(@mapping.mapping_id).value).to eq(
+          baseline.value
+        )
+        expect(
+          baseline.released_relations(journal: commands, through_generation: 2)
+        ).to eq([relation])
+        expect(
+          baseline.released_relations(
+            journal: commands,
+            through_generation: 2,
+            before_command_id: withdrawal_command
+          )
+        ).to eq([])
+        expect {
+          baseline.released_relations(
+            journal: commands,
+            through_generation: 3,
+            before_command_id: withdrawal_command
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+      end
+      field_control_edit!(relation, "9" * 24)
+      with_runtime do |context, mutations|
+        commands =
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+        held = authority(context, mutations, release_lease)
+        field_control_ownership(context, commands, held).capture
+        expect(
+          DiscussionBridgeGhost::NativeBaselineJournal
+            .new(context: context, journal: commands)
+            .retained(withdrawal_command)
+            .value
+            .fetch(relation)
+        ).to eq(relation == "authors" ? ["1" * 24] : ["3" * 24])
+      end
+      field_control_policy!(
+        authors: relation == "authors" ? ["2" * 24] : ["1" * 24],
+        taxonomy: relation == "taxonomy" ? ["4" * 24] : ["3" * 24]
+      )
+      selected_command = nil
+      with_runtime do |context, mutations|
+        lease = claim(context, mutations, key: "claim:legacy-reselection")
+        expect(lease.fetch("lease_generation")).to eq(3)
+        held = authority(context, mutations, lease)
+        commands =
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+        ownership = field_control_ownership(context, commands, held)
+        ownership.capture
+        selected =
+          managed_publish_arguments(context, lease, @field_control_native)
+        selected_command = selected.fetch(:command_id)
+        commands.prepare(**selected)
+        executor =
+          DiscussionBridgeGhost::NativeExecutor.new(
+            context: context,
+            journal: commands,
+            authority: held,
+            api_key: "a" * 24 + ":" + "12" * 32
+          )
+        result = executor.execute(selected_command)
+        expect(result.fetch("native_id")).to eq("a" * 24)
+        expect(executor.execute(selected_command)).to eq(result)
+        field_control_edit!(relation, "9" * 24)
+        expect { ownership.capture }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+      end
+      with_runtime do |context, _mutations|
+        commands =
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+        baselines =
+          DiscussionBridgeGhost::NativeBaselineJournal.new(
+            context: context,
+            journal: commands
+          )
+        expect(
+          baselines.current(@mapping.mapping_id).value.fetch("command_id")
+        ).to eq(selected_command)
+        expect(
+          baselines.retained(withdrawal_command).value.fetch(relation)
+        ).to eq(relation == "authors" ? ["1" * 24] : ["3" * 24])
+      end
+      expect(
+        @installation
+          .operational_records
+          .where(id: historical_bytes.map(&:first))
+          .order(:id)
+          .pluck(:id, :encrypted_payload)
+      ).to eq(historical_bytes.sort_by(&:first))
+      expect(
+        a_request(
+          :post,
+          %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+        )
+      ).to have_been_made.once
+      expect(
+        a_request(
+          :put,
+          %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+        )
+      ).to have_been_made.times(3)
+    end
   end
 
   %w[authors taxonomy].each do |relation|

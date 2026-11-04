@@ -108,12 +108,22 @@ module DiscussionBridgeGhost
 
     # Historical facts only. Both ends are exact generations supplied by the
     # genuine content command and current command/work, not today's policy.
-    # Fixed-width counter keys permit two bounded existing-index range lookups;
-    # later releases cannot change reconstruction of an older physical effect.
-    def released_relations(identity:, after_generation:, through_generation:)
+    # Fixed-width counter keys permit two indexed range lookups. Historical
+    # reconstruction additionally uses the original command preparation row;
+    # current comparisons may include later observations in that generation.
+    def released_relations(
+      identity:,
+      after_generation:,
+      through_generation:,
+      before_record_id: nil
+    )
       check!
       @protocol.validate!("UInt", after_generation)
       @protocol.validate!("PositiveUInt", through_generation)
+      valid_cutoff =
+        before_record_id.nil? ||
+          (before_record_id.is_a?(Integer) && before_record_id.positive?)
+      raise Error.new("identity_conflict") unless valid_cutoff
       if after_generation > through_generation
         raise Error.new("identity_conflict")
       end
@@ -124,13 +134,13 @@ module DiscussionBridgeGhost
         .select do |relation|
           lower = key_for(mapping, relation, after_generation)
           upper = key_for(mapping, relation, through_generation)
-          row =
+          scope =
             @installation
               .operational_records
               .where(kind: KIND, mapping_public_id: mapping)
               .where("record_key > ? AND record_key <= ?", lower, upper)
-              .order(record_key: :desc)
-              .first
+          scope = scope.where("id < ?", before_record_id) if before_record_id
+          row = scope.order(record_key: :desc).first
           next false unless row
           value = row.private_payload
           validate!(value, key: row.record_key, mapping_id: mapping)
