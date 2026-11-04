@@ -1619,7 +1619,13 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     [baseline, lease]
   end
 
-  def finish_policy_history(baseline, lease, app: Rails.application)
+  def finish_policy_history(
+    baseline,
+    lease,
+    app: Rails.application,
+    verify: true
+  )
+    return unless verify
     3.times do
       with_runtime(app: app) do |context, mutations|
         intake =
@@ -1642,6 +1648,87 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         intake.verify_next
       end
     end
+  end
+
+  it "does not reset cross-page uniqueness memory when an earlier sighting disappears" do
+    baseline, lease = offline_history_fixture
+    finish_policy_history(baseline, lease, verify: false)
+    with_runtime do |context, mutations|
+      intake =
+        DiscussionBridgeGhost::PolicyHistoryIntake.new(
+          context: context,
+          authority: authority(context, mutations, lease),
+          baseline: baseline
+        )
+      expect(intake.verify_next).to eq("complete" => false, "pages" => 1)
+    end
+    @installation
+      .operational_records
+      .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::REVISION)
+      .order(:id)
+      .first
+      .destroy!
+    with_runtime do |context, mutations|
+      intake =
+        DiscussionBridgeGhost::PolicyHistoryIntake.new(
+          context: context,
+          authority: authority(context, mutations, lease),
+          baseline: baseline
+        )
+      expect { intake.verify_next }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+    expect(
+      @installation
+        .operational_records
+        .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::VERIFIED)
+        .count
+    ).to eq(0)
+  end
+
+  it "atomically rejects raw history mutation between page validation and its verification commit" do
+    baseline, lease = offline_history_fixture
+    finish_policy_history(baseline, lease, verify: false)
+    with_runtime do |context, mutations|
+      intake =
+        DiscussionBridgeGhost::PolicyHistoryIntake.new(
+          context: context,
+          authority: authority(context, mutations, lease),
+          baseline: baseline
+        )
+      page =
+        @installation
+          .operational_records
+          .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::PAGE)
+          .order(:id)
+          .last
+      allow(context).to receive(:commit).and_wrap_original do |original, &block|
+        page
+          .class
+          .where(id: page.id)
+          .update_all(encrypted_payload: page.encrypted_payload)
+        original.call(&block)
+      end
+      expect { intake.verify_next }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+    expect(
+      @installation
+        .operational_records
+        .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::VERIFIED)
+        .count
+    ).to eq(0)
+    expect(
+      @installation
+        .operational_records
+        .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::REVISION)
+        .count
+    ).to eq(0)
+    finish_policy_history(baseline, lease)
+    expect(
+      @installation
+        .operational_records
+        .where(kind: DiscussionBridgeGhost::PolicyHistoryIntake::VERIFIED)
+        .count
+    ).to eq(1)
   end
 
   %w[
