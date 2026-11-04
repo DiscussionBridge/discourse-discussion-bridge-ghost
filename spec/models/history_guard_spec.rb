@@ -83,6 +83,22 @@ RSpec.describe DiscussionBridgeGhost::HistoryGuard do
     expect(token(second_owner, second_key)).not_to eq(before)
   end
 
+  it "does not reuse a cached guard after an out-of-band native database mutation" do
+    owner = installation
+    key = "#{SecureRandom.uuid}:#{"a" * 64}:0000000000000001"
+    record = page(owner, "#{key}:0000000000000001")
+    connection = owner.class.connection
+    connection.cache do
+      previous = token(owner, key)
+      # Raw PostgreSQL intentionally bypasses Active Record cache invalidation,
+      # as another process's write would; the real database trigger still runs.
+      connection.raw_connection.exec(
+        "UPDATE discussion_bridge_ghost_records SET encrypted_payload = 'outside-cache' WHERE id = #{record.id}"
+      )
+      expect(token(owner, key)).not_to eq(previous)
+    end
+  end
+
   it "rejects malformed history locators and transactionally covers TRUNCATE" do
     owner = installation
     key = "#{SecureRandom.uuid}:#{"a" * 64}:0000000000000001"
