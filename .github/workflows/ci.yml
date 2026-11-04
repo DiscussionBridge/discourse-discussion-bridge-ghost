@@ -30,5 +30,7 @@ jobs:
         run: ruby test/ownership_receipt_test.rb
       - name: Run native effect readback and preservation vectors
         run: ruby test/native_document_test.rb
+      - name: Verify immutable native CI dependencies and full test discovery
+        run: ruby test/ci_pins_test.rb && ruby scripts/check-ci-pins.rb
       - name: Verify unfinished package and protocol identities
         run: ruby scripts/check-development.rb

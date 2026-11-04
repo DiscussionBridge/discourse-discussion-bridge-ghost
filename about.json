@@ -1,13 +1,5 @@
 {
   "name": "DiscussionBridge for Ghost",
   "about_url": "https://discussionbridge.dev/",
-  "license_url": "https://github.com/DiscussionBridge/discourse-discussion-bridge-ghost/blob/codex/v4-ghost-connector-20261102/LICENSE",
-  "tests": {
-    "requiredPlugins": [
-      {
-        "url": "https://github.com/DiscussionBridge/discourse-discussion-bridge.git",
-        "branch": "codex/v4-install-readiness-20261029"
-      }
-    ]
-  }
+  "license_url": "https://github.com/DiscussionBridge/discourse-discussion-bridge-ghost/blob/codex/v4-ghost-connector-20261102/LICENSE"
 }

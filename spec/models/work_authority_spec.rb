@@ -867,7 +867,60 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     expect(a_request(:any, /ghost-authority-/)).not_to have_been_made
   end
 
-  it "retains a managed draft under actual V4 authority and refuses an edited managed baseline before a later PUT" do
+  def managed_publish_arguments(context, lease, native)
+    args, = native_arguments(context, lease)
+    prior_section =
+      Nokogiri::HTML5.fragment(
+        native.fetch("html"),
+        **DiscussionBridgeGhost::OwnedFragment::OPTIONS
+      ).at_css("section[data-discussionbridge-owned]")
+    fragment =
+      DiscussionBridgeGhost::OwnedFragment.new(
+        resource_id: @record.resource_id,
+        kind: "post",
+        native_id: native.fetch("id"),
+        nonce: "ab" * 32,
+        maximum_bytes: 262_144
+      )
+    prior_fragment =
+      DiscussionBridgeGhost::OwnedFragment.new(
+        resource_id: @record.resource_id,
+        kind: "post",
+        native_id: prior_section["data-discussionbridge-native-id"],
+        nonce: "ab" * 32,
+        maximum_bytes: 262_144
+      )
+    html = owned_execution_html(fragment, args.fetch(:command_id))
+    fields =
+      args.fetch(:candidate).merge(
+        "visibility" => "public",
+        "published_at" => "2026-11-03T15:00:00.000Z",
+        "updated_at" => native.fetch("updated_at"),
+        "lexical" =>
+          DiscussionBridgeGhost::OwnedLexical.new(fragment: fragment).replace(
+            current: native,
+            html: html,
+            expected_revision: native.fetch("updated_at"),
+            baseline_sha256:
+              prior_fragment.extract(native.fetch("html")).sha256,
+            prior_fragment: prior_fragment
+          )
+      )
+    management =
+      DiscussionBridgeGhost::NativeManagement.for_policy(
+        protocol: context.protocol,
+        policy: @connection.reload.cms_configuration.fetch("policy"),
+        stage: "publish"
+      )
+    args[:baseline] = native
+    args[:candidate] = native.merge(fields).merge(
+      "management" => management.value
+    )
+    args[:request]["body_bytes"] = JSON.generate("posts" => [fields])
+    args
+  end
+
+  it "executes a managed publish under real V4 authority, advances its head, and reaches the prewrite safeguard before rejecting an edited update" do
     with_runtime do |context, mutations|
       lease = claim(context, mutations)
       held = authority(context, mutations, lease)
@@ -959,32 +1012,103 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       expect(@mapping.reload.destination_native_id).to eq(nil)
       expect(@work.reload.state).to eq("leased")
 
+      original_completion = native_journal.retained(args.fetch(:command_id))
+      draft_head = saved.current(@mapping.mapping_id)
+      original_entry =
+        @installation
+          .operational_records
+          .find_by!(
+            kind: "native_managed_baseline",
+            record_key: args.fetch(:command_id)
+          )
+          .encrypted_payload
+      publication = managed_publish_arguments(context, lease, native)
+      stub_request(
+        :put,
+        @target.admin_origin + publication.dig(:request, "path")
+      ).to_return do |request|
+        applied = JSON.parse(request.body).fetch("posts").fetch(0)
+        rendered =
+          JSON
+            .parse(applied.fetch("lexical"))
+            .fetch("root")
+            .fetch("children")
+            .filter_map { |node| node["html"] }
+            .join
+        native =
+          native.merge(applied).merge(
+            "html" => rendered,
+            "updated_at" => "2026-11-03T16:02:00.000Z"
+          )
+        {
+          status: 200,
+          headers: {
+            "Content-Type" => "application/json"
+          },
+          body: JSON.generate("posts" => [native])
+        }
+      end
+      reached = []
+      safeguard =
+        TracePoint.new(:call) do |event|
+          if event.self.is_a?(DiscussionBridgeGhost::NativeBaselineJournal) &&
+               event.method_id == :assert_before_write!
+            reached << event
+              .binding
+              .local_variable_get(:command)
+              .fetch("command_id")
+          end
+        end
+      native_journal.prepare(**publication)
+      published = nil
+      safeguard.enable do
+        published = executor.execute(publication.fetch(:command_id))
+      end
+      expect(reached).to eq([publication.fetch(:command_id)])
+      expect(published.fetch("native_id")).to eq(native.fetch("id"))
+      expect(native.fetch("status")).to eq("published")
+      head = saved.current(@mapping.mapping_id)
+      expect(head.value.fetch("command_id")).to eq(
+        publication.fetch(:command_id)
+      )
+      expect(head.value.fetch("previous_sha256")).to eq(draft_head.sha256)
+      expect(head.value.dig("fragment", "native_id")).to eq(native.fetch("id"))
+      expect(head.sha256).not_to eq(draft_head.sha256)
+      expect(head.assert_current!(native)).to eq(true)
+      expect(native_journal.retained(args.fetch(:command_id))).to eq(
+        original_completion
+      )
+      expect(
+        @installation
+          .operational_records
+          .find_by!(
+            kind: "native_managed_baseline",
+            record_key: args.fetch(:command_id)
+          )
+          .encrypted_payload
+      ).to eq(original_entry)
+      expect(executor.execute(publication.fetch(:command_id))).to eq(published)
+      expect(@mapping.reload.destination_native_id).to eq(nil)
+      expect(@work.reload.state).to eq("leased")
+
       # Ghost has been edited before the next command was prepared. Even its
       # fresh CAS baseline already contains that change; it must not be blessed.
-      native = native.merge("title" => "An editor changed the managed title")
-      second, = native_arguments(context, lease)
-      fields =
-        second.fetch(:candidate).merge(
-          "visibility" => "public",
-          "published_at" => "2026-11-03T15:00:00.000Z",
-          "updated_at" => native.fetch("updated_at")
+      native =
+        native.merge(
+          "title" => "An editor changed the managed title",
+          "updated_at" => "2026-11-03T16:03:00.000Z"
         )
-      management =
-        DiscussionBridgeGhost::NativeManagement.for_policy(
-          protocol: context.protocol,
-          policy: @connection.reload.cms_configuration.fetch("policy"),
-          stage: "publish"
-        )
-      second[:baseline] = native
-      second[:candidate] = native.merge(fields).merge(
-        "management" => management.value
-      )
-      second[:request]["body_bytes"] = JSON.generate("posts" => [fields])
+      second = managed_publish_arguments(context, lease, native)
       native_journal.prepare(**second)
       before = saved.current(@mapping.mapping_id).sha256
-      expect { executor.execute(second.fetch(:command_id)) }.to raise_error(
-        DiscussionBridgeGhost::Error
-      ) { |error| expect(error.code).to eq("identity_conflict") }
+      expect {
+        safeguard.enable { executor.execute(second.fetch(:command_id)) }
+      }.to raise_error(DiscussionBridgeGhost::Error) { |error|
+        expect(error.code).to eq("identity_conflict")
+      }
+      expect(reached).to eq(
+        [publication.fetch(:command_id), second.fetch(:command_id)]
+      )
       expect(saved.current(@mapping.mapping_id).sha256).to eq(before)
       expect(
         native_journal.retained(second.fetch(:command_id)).dig(
@@ -1004,7 +1128,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         :put,
         %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/}
       )
-    ).not_to have_been_made
+    ).to have_been_made.once
   end
 
   it "does not let a current From lease authorize another generation, resource, To move or From move" do

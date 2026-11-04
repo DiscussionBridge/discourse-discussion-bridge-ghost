@@ -17,3 +17,11 @@ marked accordingly. Do not treat it as MIT-only code.
 
 Existing Ghost and receiver repositories' licenses are unchanged. No
 release or qualified installation package is published.
+
+The separate CI-only `.github/workflows/discourse-plugin-pinned.yml` is derived
+from the standard Discourse plugin workflow at
+`discourse/.github@bee9ee78c8e6fd574a8496f415e08c6eb412d3df` and retains its
+upstream `GPL-2.0-only` license (author declaration: Discourse). Its source,
+modifications and license provenance are recorded in
+`.github/UPSTREAM_DISCOURSE_CI.md`; full GPL version 2 text is in `LICENSE`.
+This does not relicense the connector's independently authored runtime code.
