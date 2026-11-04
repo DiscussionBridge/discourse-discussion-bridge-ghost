@@ -3,6 +3,7 @@
 require "rails_helper"
 require_relative "../../lib/discussion_bridge_ghost/native_command_journal"
 require_relative "../../lib/discussion_bridge_ghost/native_executor"
+require_relative "../../lib/discussion_bridge_ghost/native_managed_baseline"
 
 RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
   self.use_transactional_tests = false
@@ -202,6 +203,7 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
     native =
       args
         .fetch(:candidate)
+        .except("management")
         .merge(
           "id" => args.dig(:identity, "native_id") || "a" * 24,
           "type" => args.dig(:identity, "kind"),
@@ -257,6 +259,541 @@ RSpec.describe DiscussionBridgeGhost::NativeCommandJournal do
         },
         body: JSON.generate("#{queried}s" => values)
       )
+    end
+  end
+
+  def managed_arguments(
+    context,
+    stage: "create_draft",
+    previous: nil,
+    policy: nil,
+    first: nil
+  )
+    policy ||= {
+      "policy_revision" => SecureRandom.uuid,
+      "enabled" => true,
+      "selection" => "all_public",
+      "category_ids" => [],
+      "include_topic_ids" => [],
+      "exclude_topic_ids" => [],
+      "include_unlisted" => false,
+      "publication_kind" => "dynamic",
+      "presentation_mode" => "full",
+      "author_ids" => [],
+      "taxonomy_ids" => []
+    }
+    args = arguments(action: stage)
+    if first
+      args[:identity]["resource_id"] = first.dig(:identity, "resource_id")
+      args[:owner]["mapping_id"] = first.dig(:owner, "mapping_id")
+    end
+    args[:baseline] = previous
+    args[:identity]["native_id"] = previous && previous.fetch("id")
+    fields = {
+      "title" => "Proven complete article",
+      "slug" => "managed-article",
+      "status" => stage == "publish" ? "published" : "draft",
+      "visibility" => "public"
+    }
+    unless stage == "create_draft"
+      fields["id"] = previous.fetch("id")
+      fields["updated_at"] = previous.fetch("updated_at")
+    end
+    if stage == "withdraw"
+      fields = fields.slice("id", "status", "updated_at")
+    else
+      parser =
+        DiscussionBridgeGhost::OwnedFragment.new(
+          resource_id: args.dig(:identity, "resource_id"),
+          kind: "post",
+          native_id: previous ? previous.fetch("id") : "pending",
+          nonce: "ab" * 32,
+          maximum_bytes: 262_144
+        )
+      attributes =
+        parser.attributes.merge(
+          "data-discussionbridge-source-revision" =>
+            args.dig(:owner, "source_revision"),
+          "data-discussionbridge-mode" => "full"
+        )
+      html =
+        parser.stamp_command(
+          parser.wrap(
+            "<section #{attributes.map { |key, value| "#{key}=\"#{value}\"" }.join(" ")}><p>Proven body</p></section>"
+          ),
+          command_id: args.fetch(:command_id)
+        )
+      lexical = DiscussionBridgeGhost::OwnedLexical.new(fragment: parser)
+      fields["lexical"] = if previous
+        old =
+          Nokogiri::HTML5.fragment(
+            previous.fetch("html"),
+            **DiscussionBridgeGhost::OwnedFragment::OPTIONS
+          ).at_css("section[data-discussionbridge-owned]")
+        prior =
+          DiscussionBridgeGhost::OwnedFragment.new(
+            resource_id: args.dig(:identity, "resource_id"),
+            kind: "post",
+            native_id: old["data-discussionbridge-native-id"],
+            nonce: "ab" * 32,
+            maximum_bytes: 262_144
+          )
+        lexical.replace(
+          current: previous,
+          html: html,
+          expected_revision: previous.fetch("updated_at"),
+          baseline_sha256: prior.extract(previous.fetch("html")).sha256,
+          prior_fragment: prior
+        )
+      else
+        lexical.create(html)
+      end
+      fields["tags"] = (
+        if previous
+          previous.fetch("tags")
+        else
+          [
+            {
+              "name" =>
+                "#discussionbridge-resource-#{args.dig(:identity, "resource_id")}"
+            }
+          ]
+        end
+      )
+      if stage == "publish"
+        fields["published_at"] = "2026-11-03T09:00:00.000Z"
+        unless policy.fetch("author_ids").empty?
+          fields["authors"] = policy
+            .fetch("author_ids")
+            .map { |id| { "id" => id } }
+        end
+        unless policy.fetch("taxonomy_ids").empty?
+          fields["tags"] = policy
+            .fetch("taxonomy_ids")
+            .map { |id| { "id" => id, "name" => "Selected #{id}" } } +
+            previous
+              .fetch("tags")
+              .select do |tag|
+                tag.fetch("name").start_with?("#discussionbridge-")
+              end
+        end
+      end
+    end
+    management =
+      DiscussionBridgeGhost::NativeManagement.for_policy(
+        protocol: context.protocol,
+        policy: policy,
+        stage: stage
+      )
+    args[:candidate] = (previous || {}).merge(fields).merge(
+      "management" => management.value
+    )
+    args[:request][
+      "path"
+    ] = "/ghost/api/admin/posts/#{previous ? "#{previous.fetch("id")}/" : ""}"
+    args[:request]["body_bytes"] = JSON.generate("posts" => [fields])
+    args
+  end
+
+  def managed_completion(journal, context, args, previous: nil)
+    desired = args.fetch(:candidate).except("management")
+    tree = JSON.parse(desired.fetch("lexical"))
+    html =
+      tree
+        .fetch("root")
+        .fetch("children")
+        .filter_map { |node| node["html"] }
+        .join
+    overrides = {
+      "html" => html,
+      "authors" =>
+        desired.fetch(
+          "authors",
+          [{ "id" => "b" * 24, "name" => "Native default" }]
+        ),
+      "tags" =>
+        desired
+          .fetch("tags")
+          .map
+          .with_index do |tag, index|
+            tag.key?("id") ? tag : tag.merge("id" => (index + 14).to_s(16) * 24)
+          end
+    }
+    _command, native =
+      completed_response(journal, context, args, native_overrides: overrides)
+    stub_native_reads(args, native)
+    DiscussionBridgeGhost::NativeExecutor.new(
+      context: context,
+      journal: journal,
+      api_key: "a" * 24 + ":" + "12" * 32
+    ).recover(args.fetch(:command_id))
+    baseline =
+      DiscussionBridgeGhost::NativeManagedBaseline.from_completed(
+        journal: journal,
+        command_id: args.fetch(:command_id),
+        previous: previous
+      )
+    [baseline, native]
+  end
+
+  it "derives a detached managed baseline only from genuine retained completion without writing more state" do
+    first = nil
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      journal.prepare(**first)
+      expect {
+        DiscussionBridgeGhost::NativeManagedBaseline.from_completed(
+          journal: journal,
+          command_id: first.fetch(:command_id)
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      baseline, native = managed_completion(journal, context, first)
+      before = encrypted_snapshot
+      rebuilt =
+        DiscussionBridgeGhost::NativeManagedBaseline.from_completed(
+          journal: journal,
+          command_id: first.fetch(:command_id)
+        )
+      expect(rebuilt.sha256).to eq(baseline.sha256)
+      expect(encrypted_snapshot).to eq(before)
+      expect(baseline.value).to be_frozen
+      expect(baseline.value.fetch("scalars")).to be_frozen
+      expect(baseline.value.fetch("authors")).to eq(nil)
+      expect(baseline.value.fetch("taxonomy")).to eq(nil)
+      expect(baseline.value.fetch("scalars")).not_to have_key("published_at")
+      expect(baseline.assert_current!(native)).to eq(true)
+      expect(baseline.inspect).not_to include(
+        "Proven body",
+        "Proven complete article"
+      )
+    end
+    with_journal do |journal, _context|
+      expect(
+        DiscussionBridgeGhost::NativeManagedBaseline
+          .from_completed(
+            journal: journal,
+            command_id: first.fetch(:command_id)
+          )
+          .value
+          .fetch("command_id")
+      ).to eq(first.fetch(:command_id))
+    end
+  end
+
+  it "refuses to turn descriptor-free development history into managed ownership evidence" do
+    with_journal do |journal, context|
+      args = arguments
+      _command, native = completed_response(journal, context, args)
+      stub_native_reads(args, native)
+      DiscussionBridgeGhost::NativeExecutor.new(
+        context: context,
+        journal: journal,
+        api_key: "a" * 24 + ":" + "12" * 32
+      ).recover(args.fetch(:command_id))
+      expect {
+        DiscussionBridgeGhost::NativeManagedBaseline.from_completed(
+          journal: journal,
+          command_id: args.fetch(:command_id)
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+  end
+
+  it "detects changes to every managed scalar and native identity while tolerating native timestamp refresh" do
+    with_journal do |journal, context|
+      baseline, native =
+        managed_completion(journal, context, managed_arguments(context))
+      baseline
+        .value
+        .fetch("scalars")
+        .each_key do |key|
+          expect {
+            baseline.assert_current!(native.merge(key => "Changed by editor"))
+          }.to raise_error(DiscussionBridgeGhost::Error)
+          expect {
+            baseline.assert_current!(native.except(key))
+          }.to raise_error(DiscussionBridgeGhost::Error)
+        end
+      %w[id type].each do |key|
+        expect {
+          baseline.assert_current!(native.merge(key => "foreign"))
+        }.to raise_error(DiscussionBridgeGhost::Error)
+      end
+      expect(
+        baseline.assert_current!(
+          native.merge("updated_at" => "2026-11-04T00:00:00.000Z")
+        )
+      ).to eq(true)
+    end
+  end
+
+  it "allows unrelated cards, settings, native author edits and unselected taxonomy without redefining managed state" do
+    with_journal do |journal, context|
+      baseline, native =
+        managed_completion(journal, context, managed_arguments(context))
+      changed = Marshal.load(Marshal.dump(native))
+      changed["custom_excerpt"] = "An editor-owned excerpt"
+      changed["authors"] = [{ "id" => "c" * 24 }]
+      changed["tags"] << { "id" => "d" * 24, "name" => "Editorial tag" }
+      tree = JSON.parse(changed.fetch("lexical"))
+      tree
+        .fetch("root")
+        .fetch("children")
+        .unshift(
+          {
+            "type" => "paragraph",
+            "children" => [
+              { "type" => "text", "text" => "Unrelated editor text" }
+            ]
+          }
+        )
+      card = tree.fetch("root").fetch("children").last
+      card[
+        "html"
+      ] = "<p>Unrelated prefix</p>#{card.fetch("html")}<p>Unrelated suffix</p>"
+      changed["lexical"] = JSON.generate(tree)
+      changed["html"] = card.fetch("html")
+      expect(baseline.assert_current!(changed)).to eq(true)
+      expect(baseline.value.fetch("scalars")).not_to have_key("custom_excerpt")
+    end
+  end
+
+  it "refuses edited owned content, missing cards, duplicate cards and owned-card property changes" do
+    with_journal do |journal, context|
+      baseline, native =
+        managed_completion(journal, context, managed_arguments(context))
+      expect {
+        baseline.assert_current!(
+          native.merge(
+            "html" => native.fetch("html").sub("Proven body", "Editor body")
+          )
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      %i[content missing duplicate properties].each do |change|
+        tree = JSON.parse(native.fetch("lexical"))
+        cards = tree.fetch("root").fetch("children")
+        case change
+        when :content
+          cards.first["html"] = cards
+            .first
+            .fetch("html")
+            .sub("Proven body", "Editor body")
+        when :missing
+          cards.clear
+        when :duplicate
+          cards << cards.first.dup
+        when :properties
+          cards.first["visibility"] = { "web" => false }
+        end
+        expect {
+          baseline.assert_current!(
+            native.merge("lexical" => JSON.generate(tree))
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+      end
+    end
+  end
+
+  it "requires prior proven ancestry for publish and advances pending to the actual native ID" do
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      draft, native = managed_completion(journal, context, first)
+      args =
+        managed_arguments(
+          context,
+          stage: "publish",
+          previous: native,
+          first: first
+        )
+      published, current =
+        managed_completion(journal, context, args, previous: draft)
+      expect(published.value.dig("fragment", "native_id")).to eq(
+        native.fetch("id")
+      )
+      expect(published.value.fetch("previous_sha256")).to eq(draft.sha256)
+      expect(published.value.fetch("content_command_id")).to eq(
+        args.fetch(:command_id)
+      )
+      expect(
+        published.assert_current!(
+          current.merge("published_at" => "2026-11-03T09:00:00Z")
+        )
+      ).to eq(true)
+      expect {
+        published.assert_current!(
+          current.merge("published_at" => "2026-11-03T09:00:01Z")
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect {
+        DiscussionBridgeGhost::NativeManagedBaseline.from_completed(
+          journal: journal,
+          command_id: args.fetch(:command_id)
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect {
+        DiscussionBridgeGhost::NativeManagedBaseline.new
+      }.to raise_error(NoMethodError)
+    end
+  end
+
+  it "checks complete ordered author and taxonomy selections without treating new policy intent as prior proof" do
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      draft, native = managed_completion(journal, context, first)
+      selected = {
+        "policy_revision" => SecureRandom.uuid,
+        "enabled" => true,
+        "selection" => "all_public",
+        "category_ids" => [],
+        "include_topic_ids" => [],
+        "exclude_topic_ids" => [],
+        "include_unlisted" => false,
+        "publication_kind" => "dynamic",
+        "presentation_mode" => "full",
+        "author_ids" => ["1" * 24, "2" * 24],
+        "taxonomy_ids" => ["3" * 24, "4" * 24]
+      }
+      args =
+        managed_arguments(
+          context,
+          stage: "publish",
+          previous: native,
+          first: first,
+          policy: selected
+        )
+      published, current =
+        managed_completion(journal, context, args, previous: draft)
+      expect(published.value.fetch("authors")).to eq(
+        selected.fetch("author_ids")
+      )
+      expect(published.value.fetch("taxonomy")).to eq(
+        selected.fetch("taxonomy_ids")
+      )
+      %w[authors tags].each do |key|
+        expect {
+          published.assert_current!(
+            current.merge(key => current.fetch(key).reverse)
+          )
+        }.to raise_error(DiscussionBridgeGhost::Error)
+      end
+      expect {
+        published.assert_current!(
+          current.merge(
+            "tags" =>
+              current.fetch("tags") +
+                [{ "id" => "5" * 24, "name" => "Unselected addition" }]
+          )
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      next_args =
+        managed_arguments(
+          context,
+          stage: "publish",
+          previous: current,
+          first: first
+        )
+      released, _latest =
+        managed_completion(journal, context, next_args, previous: published)
+      expect(released.value.fetch("authors")).to eq(nil)
+      expect(released.value.fetch("taxonomy")).to eq(nil)
+      expect(published.value.fetch("authors")).to eq(
+        selected.fetch("author_ids")
+      )
+    end
+  end
+
+  it "carries the last proven article and metadata profile across status-only withdrawal" do
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      draft, native = managed_completion(journal, context, first)
+      args =
+        managed_arguments(
+          context,
+          stage: "publish",
+          previous: native,
+          first: first
+        )
+      published, current =
+        managed_completion(journal, context, args, previous: draft)
+      withdrawal =
+        managed_arguments(
+          context,
+          stage: "withdraw",
+          previous: current,
+          first: first
+        )
+      withdrawn, final =
+        managed_completion(journal, context, withdrawal, previous: published)
+      expect(withdrawn.value.fetch("content_command_id")).to eq(
+        args.fetch(:command_id)
+      )
+      expect(withdrawn.value.fetch("content_policy_revision")).to eq(
+        published.value.fetch("content_policy_revision")
+      )
+      expect(withdrawn.value.fetch("management").fetch("scalar_fields")).to eq(
+        ["status"]
+      )
+      expect(withdrawn.value.fetch("scalars")).to eq(
+        published.value.fetch("scalars").merge("status" => "draft")
+      )
+      expect(withdrawn.value.fetch("fragment")).to eq(
+        published.value.fetch("fragment")
+      )
+      expect(withdrawn.assert_current!(final)).to eq(true)
+      expect {
+        withdrawn.assert_current!(
+          final.merge("title" => "Edited while withdrawn")
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+  end
+
+  it "does not bless a managed edit already present in the baseline of a later physical completion" do
+    with_journal do |journal, context|
+      first = managed_arguments(context)
+      draft, native = managed_completion(journal, context, first)
+      edited = native.merge("title" => "Operator changed a managed title")
+      args =
+        managed_arguments(
+          context,
+          stage: "publish",
+          previous: edited,
+          first: first
+        )
+      expect {
+        managed_completion(journal, context, args, previous: draft)
+      }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(draft.value.fetch("scalars").fetch("title")).to eq(
+        "Proven complete article"
+      )
+    end
+  end
+
+  it "refuses missing or conflicting resource tags, malformed native relation data and oversized observations" do
+    with_journal do |journal, context|
+      baseline, native =
+        managed_completion(journal, context, managed_arguments(context))
+      [
+        [],
+        native.fetch("tags") +
+          [
+            {
+              "id" => "6" * 24,
+              "name" => "#discussionbridge-resource-#{SecureRandom.uuid}"
+            }
+          ],
+        [{ "id" => "not-a-native-id", "name" => "bad" }],
+        [{ "id" => "7" * 24, "name" => 123 }]
+      ].each do |tags|
+        expect {
+          baseline.assert_current!(native.merge("tags" => tags))
+        }.to raise_error(DiscussionBridgeGhost::Error)
+      end
+      expect {
+        baseline.assert_current!(
+          native.merge("custom_excerpt" => "x" * 262_144)
+        )
+      }.to raise_error(DiscussionBridgeGhost::Error)
     end
   end
 
