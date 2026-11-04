@@ -1610,6 +1610,25 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         # Current selection is no longer empty, but its old physical baseline
         # must stay untouched until the real new write completes.
         ownership.capture
+        descriptor = held.native_management!(stage: "publish")
+        expect {
+          DiscussionBridgeGhost::NativeFieldControlJournal.new(
+            context: context
+          ).observe!(descriptor)
+        }.to raise_error(DiscussionBridgeGhost::Error)
+        damaged =
+          @installation.operational_records.find_by!(
+            kind: "native_field_release",
+            record_key: release_key
+          )
+        payload = damaged.private_payload
+        payload.fetch("work")["lease_generation"] += 1
+        rewrite_record(damaged, payload)
+        expect { ownership.capture }.to raise_error(
+          DiscussionBridgeGhost::Error
+        )
+        damaged.update!(encrypted_payload: release_bytes)
+        ownership.capture
         safe = @field_control_native
         other = relation == "authors" ? "taxonomy" : "authors"
         field_control_edit!(other, "8" * 24)
@@ -1654,6 +1673,46 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
           DiscussionBridgeGhost::Error
         )
       end
+      # A later clear crosses the decimal 9 -> 10 boundary. It cannot become
+      # retroactive permission while reconstructing the earlier generation-3
+      # completion, or shadow the earlier release in a bounded history lookup.
+      field_control_policy!(
+        authors: relation == "authors" ? [] : ["1" * 24],
+        taxonomy: relation == "taxonomy" ? [] : ["3" * 24]
+      )
+      @mapping.update!(fence_generation: 9) # synthetic prior receiver high-water
+      with_runtime do |context, mutations|
+        lease = claim(context, mutations, key: "claim:later-clear")
+        expect(lease.fetch("lease_generation")).to eq(10)
+        authority(context, mutations, lease).native_management!(
+          stage: "publish"
+        )
+        commands =
+          DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+        saved =
+          DiscussionBridgeGhost::NativeBaselineJournal.new(
+            context: context,
+            journal: commands
+          )
+        prior = saved.current(@mapping.mapping_id)
+        expect(prior.value.fetch("command_id")).to eq(selected_command)
+        history =
+          DiscussionBridgeGhost::NativeFieldControlJournal.new(context: context)
+        expect(
+          history.released_relations(
+            identity: prior.value.fetch("identity"),
+            after_generation: release_lease.fetch("lease_generation"),
+            through_generation: 9
+          )
+        ).to eq([])
+        expect(
+          history.released_relations(
+            identity: prior.value.fetch("identity"),
+            after_generation: 0,
+            through_generation: 9
+          )
+        ).to eq([relation])
+      end
       with_runtime do |context, _mutations|
         saved =
           DiscussionBridgeGhost::NativeBaselineJournal.new(
@@ -1697,7 +1756,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
           .operational_records
           .where(kind: "native_field_release")
           .count
-      ).to eq(1)
+      ).to eq(2)
       expect(
         a_request(
           :post,

@@ -16,14 +16,10 @@ module DiscussionBridgeGhost
     FIELDS = %w[format binding mapping work policy relation].sort.freeze
 
     def initialize(context:, authority: nil)
-      unless context.is_a?(ExecutionContext) &&
-               (
-                 authority.nil? ||
-                   (
-                     authority.is_a?(WorkAuthority) &&
-                       authority.bound_to?(context)
-                   )
-               )
+      valid_authority =
+        authority.nil? ||
+          (authority.is_a?(WorkAuthority) && authority.bound_to?(context))
+      unless context.is_a?(ExecutionContext) && valid_authority
         raise Error.new("identity_conflict")
       end
       @context, @authority, @protocol = context, authority, context.protocol
