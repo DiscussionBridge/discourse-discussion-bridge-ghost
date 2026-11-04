@@ -3,6 +3,7 @@
 require "rails_helper"
 require_relative "../../lib/discussion_bridge_ghost/native_command_journal"
 require_relative "../../lib/discussion_bridge_ghost/native_executor"
+require_relative "../../lib/discussion_bridge_ghost/native_ownership_journal"
 
 RSpec.describe DiscussionBridgeGhost::WorkAuthority do
   self.use_transactional_tests = false
@@ -921,6 +922,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
   end
 
   it "executes a managed publish under real V4 authority, advances its head, and reaches the prewrite safeguard before rejecting an edited update" do
+    kept_key = kept_receipt = nil
     with_runtime do |context, mutations|
       lease = claim(context, mutations)
       held = authority(context, mutations, lease)
@@ -1013,6 +1015,19 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       expect(@work.reload.state).to eq("leased")
 
       original_completion = native_journal.retained(args.fetch(:command_id))
+      ownership =
+        DiscussionBridgeGhost::NativeOwnershipJournal.new(
+          context: context,
+          commands: native_journal,
+          authority: held,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      expect { ownership.capture }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(
+        @installation.operational_records.where(
+          kind: "native_ownership_receipt"
+        )
+      ).not_to exist
       draft_head = saved.current(@mapping.mapping_id)
       original_entry =
         @installation
@@ -1091,6 +1106,42 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       expect(@mapping.reload.destination_native_id).to eq(nil)
       expect(@work.reload.state).to eq("leased")
 
+      # A real current lease + completed managed publication + fresh Ghost
+      # reads can create the durable LOCAL receipt before the receiver binding
+      # is set. This is ownership evidence, not a synchronized/verified ACK.
+      observed = ownership.capture
+      kept_key, kept_receipt = observed.key, observed.receipt.sha256
+      expect(observed.receipt.value).to include(
+        "mapping_id" => @mapping.mapping_id,
+        "native_id" => native.fetch("id"),
+        "resource_id" => @record.resource_id,
+        "last_lease_generation" => lease.fetch("lease_generation")
+      )
+      expect(observed.value.fetch("baseline_sha256")).to eq(head.sha256)
+      expect(ownership.retained(observed.key).receipt.sha256).to eq(
+        observed.receipt.sha256
+      )
+      receipt_row =
+        @installation.operational_records.find_by!(
+          kind: "native_ownership_receipt"
+        )
+      original_receipt_bytes = receipt_row.encrypted_payload
+      expect(ownership.capture.key).to eq(observed.key)
+      expect(ownership.latest(@mapping.mapping_id).key).to eq(observed.key)
+      expect(receipt_row.reload.encrypted_payload).to eq(original_receipt_bytes)
+      expect(
+        @installation
+          .operational_records
+          .where(kind: "native_ownership_receipt")
+          .count
+      ).to eq(1)
+      expect(@mapping.reload.destination_native_id).to eq(nil)
+      expect(@work.reload.state).to eq("leased")
+      # Reading a missing/foreign record never imports a manufactured hash.
+      expect { ownership.retained("0" * 64) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+
       # Ghost has been edited before the next command was prepared. Even its
       # fresh CAS baseline already contains that change; it must not be blessed.
       native =
@@ -1098,6 +1149,11 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
           "title" => "An editor changed the managed title",
           "updated_at" => "2026-11-03T16:03:00.000Z"
         )
+      expect { ownership.capture }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(ownership.retained(observed.key).receipt.sha256).to eq(
+        observed.receipt.sha256
+      )
+      expect(receipt_row.reload.encrypted_payload).to eq(original_receipt_bytes)
       second = managed_publish_arguments(context, lease, native)
       native_journal.prepare(**second)
       before = saved.current(@mapping.mapping_id).sha256
@@ -1116,6 +1172,21 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
           "pending_attempt"
         )
       ).to eq(nil)
+    end
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations)
+      resumed =
+        DiscussionBridgeGhost::NativeOwnershipJournal.new(
+          context: context,
+          commands:
+            DiscussionBridgeGhost::NativeCommandJournal.new(context: context),
+          authority: authority(context, mutations, lease),
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      expect(resumed.retained(kept_key).receipt.sha256).to eq(kept_receipt)
+      expect(resumed.latest(@mapping.mapping_id).key).to eq(kept_key)
+      expect(@mapping.reload.destination_native_id).to eq(nil)
+      expect(@work.reload.state).to eq("leased")
     end
     expect(
       a_request(
