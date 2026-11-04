@@ -175,7 +175,7 @@ module DiscussionBridgeGhost
         )
       @prepared[packet] = true
       packet
-    rescue JSON::GeneratorError, EncodingError, KeyError
+    rescue @codec::Error, JSON::GeneratorError, EncodingError, KeyError
       raise Error.new("response_invalid"), cause: nil
     end
 

@@ -219,7 +219,7 @@ module DiscussionBridgeGhost
           .fetch("items")
           .each do |item|
             sequence = item.fetch("event_sequence")
-            if previous && sequence <= previous
+            if previous && Integer(sequence, 10) <= Integer(previous, 10)
               # A previously staged exact event can be delivered again harmlessly.
               unless read(EVENT, item.fetch("event_id"))&.fetch("event") == item
                 raise Error.new("identity_conflict")
@@ -254,7 +254,7 @@ module DiscussionBridgeGhost
               [
                 state.fetch("last_sequence"),
                 *page.fetch("items").map { |item| item.fetch("event_sequence") }
-              ].compact.max
+              ].compact.max_by { |sequence| Integer(sequence, 10) }
             end
           ),
         "pages" => state.fetch("pages") + 1
