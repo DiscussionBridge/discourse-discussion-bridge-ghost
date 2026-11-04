@@ -160,7 +160,7 @@ class GhostNativeHttpTest < Minitest::Test
       assert_equal 1, @connection.requests.length
       request = @connection.requests.first
       query = CGI.parse(URI.parse(request.path).query)
-      assert_equal ["id:[#{ID},#{OTHER_ID}]"], query.fetch("filter")
+      assert_equal ["id:['#{ID}','#{OTHER_ID}']"], query.fetch("filter")
       assert_equal ["2"], query.fetch("limit")
       assert_equal ["1"], query.fetch("page")
       assert_equal [expected_fields.join(",")], query.fetch("fields")

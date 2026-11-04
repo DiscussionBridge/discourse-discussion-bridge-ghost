@@ -5,6 +5,7 @@ require_relative "../../lib/discussion_bridge_ghost/native_command_journal"
 require_relative "../../lib/discussion_bridge_ghost/native_executor"
 require_relative "../../lib/discussion_bridge_ghost/native_ownership_journal"
 require_relative "../../lib/discussion_bridge_ghost/native_acknowledgements"
+require_relative "../../lib/discussion_bridge_ghost/native_metadata_selection"
 
 RSpec.describe DiscussionBridgeGhost::WorkAuthority do
   self.use_transactional_tests = false
@@ -1370,18 +1371,19 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     ).to have_been_made.once
   end
 
-  def field_control_catalogs!
+  def field_control_catalogs!(overrides: {})
     store =
       DiscussionBridge::CmsCatalogStore.new(
         @connection,
         authenticated_secret_digest: @connection.secret_digest
       )
     { "authors" => %w[1 2], "taxonomy" => %w[3 4] }.each do |kind, digits|
+      ids = overrides.fetch(kind) { digits.map { |digit| digit * 24 } }
       items =
-        digits.map do |digit|
+        ids.map do |id|
           {
-            "id" => digit * 24,
-            "label" => "Synthetic #{kind} #{digit}",
+            "id" => id,
+            "label" => "Synthetic #{kind} #{id}",
             "available" => true
           }
         end
@@ -1395,10 +1397,18 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
           }
         ).body
       id = upload.fetch("upload_id")
-      store.append_page(
-        id,
-        { "mutation_id" => SecureRandom.uuid, "page" => 0, "items" => items }
-      )
+      items
+        .each_slice(100)
+        .with_index do |slice, page|
+          store.append_page(
+            id,
+            {
+              "mutation_id" => SecureRandom.uuid,
+              "page" => page,
+              "items" => slice
+            }
+          )
+        end
       store.finalize(
         id,
         {
@@ -1748,6 +1758,222 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       lease: lease,
       api_key: "a" * 24 + ":" + "12" * 32
     )
+  end
+
+  it "retains empty native metadata selections without clearing or querying Ghost relations" do
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations)
+      lookup =
+        DiscussionBridgeGhost::NativeMetadataSelection.new(
+          context: context,
+          authority: authority(context, mutations, lease),
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      expect { lookup.selection }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(lookup.advance).to eq(
+        "complete" => true,
+        "batches" => 0,
+        "remaining" => 0
+      )
+      expect(lookup.selection).to eq("authors" => nil, "taxonomy" => nil)
+      record =
+        @installation.operational_records.find_by!(
+          kind: DiscussionBridgeGhost::NativeMetadataSelection::ENTRY
+        )
+      ciphertext = record.encrypted_payload
+      expect(lookup.advance.fetch("complete")).to eq(true)
+      expect(record.reload.encrypted_payload).to eq(ciphertext)
+    end
+    expect(
+      a_request(:any, %r{#{Regexp.escape(@target.admin_origin)}/})
+    ).not_to have_been_made
+  end
+
+  it "retains partial metadata on an automation-tag refusal and resumes only with ordinary editorial metadata" do
+    field_control_catalogs!
+    field_control_policy!(authors: ["1" * 24], taxonomy: ["3" * 24])
+    users =
+      stub_request(
+        :get,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/users/\?}
+      ).to_return(
+        status: 200,
+        headers: {
+          "Content-Type" => "application/json"
+        },
+        body:
+          JSON.generate(
+            "users" => [
+              { "id" => "1" * 24, "name" => "Author", "status" => "active" }
+            ],
+            "meta" => {
+              "pagination" => {
+                "page" => 1,
+                "total" => 1,
+                "next" => nil
+              }
+            }
+          )
+      )
+    tag_name = "#discussionbridge-source"
+    tags =
+      stub_request(
+        :get,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/tags/\?}
+      ).to_return do
+        {
+          status: 200,
+          headers: {
+            "Content-Type" => "application/json"
+          },
+          body:
+            JSON.generate(
+              "tags" => [
+                { "id" => "3" * 24, "name" => tag_name, "slug" => "selected" }
+              ],
+              "meta" => {
+                "pagination" => {
+                  "page" => 1,
+                  "total" => 1,
+                  "next" => nil
+                }
+              }
+            )
+        }
+      end
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations)
+      lookup =
+        DiscussionBridgeGhost::NativeMetadataSelection.new(
+          context: context,
+          authority: authority(context, mutations, lease),
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      expect(lookup.advance).to eq(
+        "complete" => false,
+        "batches" => 1,
+        "remaining" => 1
+      )
+      row =
+        @installation.operational_records.find_by!(
+          kind: DiscussionBridgeGhost::NativeMetadataSelection::ENTRY
+        )
+      original = row.encrypted_payload
+      expect { lookup.advance }.to raise_error(DiscussionBridgeGhost::Error)
+      expect(row.reload.encrypted_payload).to eq(original)
+      expect { lookup.selection }.to raise_error(DiscussionBridgeGhost::Error)
+      tag_name = "Editorial tag"
+      expect(lookup.advance.fetch("complete")).to eq(true)
+      expect(lookup.selection.dig("taxonomy", 0, "name")).to eq("Editorial tag")
+      expect(@mapping.reload.destination_native_id).to eq(nil)
+      expect(@work.reload.state).to eq("leased")
+      expect(@installation.mutations.where(route_id: "V4-16").count).to eq(0)
+    end
+    expect(users).to have_been_requested.once
+    expect(tags).to have_been_requested.twice
+    expect(
+      a_request(:post, %r{#{Regexp.escape(@target.admin_origin)}/})
+    ).not_to have_been_made
+    expect(
+      a_request(:put, %r{#{Regexp.escape(@target.admin_origin)}/})
+    ).not_to have_been_made
+  end
+
+  it "resumes a native metadata selection larger than one slice without truncation, duplication or native writes" do
+    ids = Array.new(101) { |index| "%024x" % (index + 100) }
+    field_control_catalogs!(overrides: { "authors" => ids })
+    field_control_policy!(authors: ids, taxonomy: [])
+    observed = []
+    native_read =
+      stub_request(
+        :get,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/users/\?}
+      ).to_return do |request|
+        query = CGI.parse(URI.parse(request.uri.to_s).query)
+        selected = query.fetch("filter").first.scan(/'([a-f0-9]{24})'/).flatten
+        observed << selected
+        {
+          status: 200,
+          headers: {
+            "Content-Type" => "application/json"
+          },
+          body:
+            JSON.generate(
+              "users" =>
+                selected.reverse.map do |id|
+                  {
+                    "id" => id,
+                    "name" => "Author #{id}",
+                    "status" => "active",
+                    "email" => "private@example.invalid"
+                  }
+                end,
+              "meta" => {
+                "pagination" => {
+                  "page" => 1,
+                  "total" => selected.length,
+                  "next" => nil
+                }
+              }
+            )
+        }
+      end
+    lease = nil
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations)
+      lookup =
+        DiscussionBridgeGhost::NativeMetadataSelection.new(
+          context: context,
+          authority: authority(context, mutations, lease),
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      expect(lookup.advance).to eq(
+        "complete" => false,
+        "batches" => 1,
+        "remaining" => 1
+      )
+      expect { lookup.selection }.to raise_error(DiscussionBridgeGhost::Error)
+    end
+    with_runtime do |context, mutations|
+      lookup =
+        DiscussionBridgeGhost::NativeMetadataSelection.new(
+          context: context,
+          authority: authority(context, mutations, lease),
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      expect(lookup.advance).to eq(
+        "complete" => true,
+        "batches" => 1,
+        "remaining" => 0
+      )
+      selected = lookup.selection
+      expect(selected.fetch("authors").map { |item| item.fetch("id") }).to eq(
+        ids
+      )
+      expect(selected.fetch("taxonomy")).to eq(nil)
+      expect(selected.to_s).not_to include("private@example.invalid")
+      expect(lookup.advance.fetch("batches")).to eq(0)
+      row =
+        @installation.operational_records.find_by!(
+          kind: DiscussionBridgeGhost::NativeMetadataSelection::ENTRY
+        )
+      original = row.encrypted_payload
+      invalid = row.private_payload
+      invalid.fetch("offsets")["authors"] = 1000
+      rewrite_record(row, invalid)
+      expect { lookup.selection }.to raise_error(DiscussionBridgeGhost::Error)
+      expect { lookup.advance }.to raise_error(DiscussionBridgeGhost::Error)
+      row.update!(encrypted_payload: original)
+      expect(lookup.selection).to eq(selected)
+    end
+    expect(observed).to eq([ids.first(100), ids.last(1)])
+    expect(native_read).to have_been_requested.twice
+    expect(
+      a_request(:post, %r{#{Regexp.escape(@target.admin_origin)}/})
+    ).not_to have_been_made
+    expect(
+      a_request(:put, %r{#{Regexp.escape(@target.admin_origin)}/})
+    ).not_to have_been_made
   end
 
   it "synchronizes actual complete native content and verifies its anonymous public fragment through V4" do

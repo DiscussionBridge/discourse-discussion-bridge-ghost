@@ -125,7 +125,8 @@ module DiscussionBridgeGhost
 
       resource = kind == "authors" ? "users" : "tags"
       fields = kind == "authors" ? %w[id name status] : %w[id name slug]
-      filter = CGI.escape("id:[#{ids.join(",")}]")
+      # Quote even all-numeric hex IDs so NQL cannot coerce/round their bytes.
+      filter = CGI.escape("id:[#{ids.map { |id| "'#{id}'" }.join(",")}]")
       data =
         read(
           "/ghost/api/admin/#{resource}/?filter=#{filter}&limit=#{ids.length}&page=1&fields=#{CGI.escape(fields.join(","))}",
