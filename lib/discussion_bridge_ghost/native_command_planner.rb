@@ -252,14 +252,13 @@ module DiscussionBridgeGhost
       baseline = @baselines.current(@mapping.fetch("mapping_id"))
       raise Error.new("identity_conflict") unless baseline
       identity = baseline.value.fetch("identity")
-      unless identity.slice("mapping_id", "resource_id", "external_id") ==
-               @mapping.slice("mapping_id", "resource_id", "external_id") &&
-               (
-                 @authority.initial_native_id.nil? ||
-                   @authority.initial_native_id == identity.fetch("native_id")
-               )
-        raise Error.new("identity_conflict")
-      end
+      same_mapping =
+        identity.slice("mapping_id", "resource_id", "external_id") ==
+          @mapping.slice("mapping_id", "resource_id", "external_id")
+      same_native_id =
+        @authority.initial_native_id.nil? ||
+          @authority.initial_native_id == identity.fetch("native_id")
+      raise Error.new("identity_conflict") unless same_mapping && same_native_id
       @commands.assert_clear!(
         resource_id: @mapping.fetch("resource_id"),
         kind: identity.fetch("kind"),

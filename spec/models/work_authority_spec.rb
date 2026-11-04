@@ -2504,7 +2504,7 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
         authority: held,
         api_key: "a" * 24 + ":" + "12" * 32
       )
-    expect(lookup.advance.fetch("complete")).to eq(true)
+    expect(lookup.advance(batch_budget: 2).fetch("complete")).to eq(true)
     lookup.selection
   end
 
@@ -2620,6 +2620,20 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       held = authority(context, mutations, lease)
       commands =
         DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      row =
+        @installation.operational_records.find_by!(
+          kind: DiscussionBridgeGhost::NativeCommandPlanner::ENTRY
+        )
+      rewrite_record(row, original_plan.last.merge("stage" => "publish"))
+      expect do
+        native_planner(context, commands, held).prepare_draft(
+          event_id: @native_event_id,
+          kind: "post",
+          slug: "article"
+        )
+      end.to raise_error(DiscussionBridgeGhost::Error)
+      expect(@planned_native_writes).to be_empty
+      row.update!(encrypted_payload: original_plan.first)
       id =
         native_planner(context, commands, held).prepare_draft(
           event_id: @native_event_id,
@@ -2670,6 +2684,270 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
           slug: "article"
         )
       ).to be_present
+    end
+  end
+
+  it "refuses a new draft when the resource already appears on the native Ghost target" do
+    native_stage_source_policy!
+    planned_native_fixture
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      complete_planner_metadata(context, held)
+      planner = native_planner(context, commands, held)
+      @field_control_native = {
+        "id" => "f" * 24,
+        "type" => "post",
+        "slug" => "article"
+      }
+      expect do
+        planner.prepare_draft(
+          event_id: @native_event_id,
+          kind: "post",
+          slug: "article"
+        )
+      end.to raise_error(DiscussionBridgeGhost::Error)
+      expect(
+        @installation.operational_records.where(
+          kind: DiscussionBridgeGhost::NativeCommandPlanner::ENTRY
+        )
+      ).to be_empty
+      expect(@planned_native_writes).to be_empty
+      @field_control_native = nil
+      expect(
+        planner.prepare_draft(
+          event_id: @native_event_id,
+          kind: "post",
+          slug: "article"
+        )
+      ).to be_present
+      expect(@planned_native_writes).to be_empty
+    end
+  end
+
+  it "plans an owned update while preserving unrelated Ghost cards and unselected metadata" do
+    native_stage_source_policy!
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held, complete: true)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      complete_planner_metadata(context, held)
+      outside = {
+        "type" => "html",
+        "version" => 1,
+        "html" => "<p>Ghost editor-owned card.</p>"
+      }
+      lexical = JSON.parse(@field_control_native.fetch("lexical"))
+      lexical.fetch("root").fetch("children") << outside
+      editorial = { "id" => "f" * 24, "name" => "Ghost editorial tag" }
+      @field_control_native =
+        @field_control_native.merge(
+          "lexical" => JSON.generate(lexical),
+          "html" => @field_control_native.fetch("html") + outside.fetch("html"),
+          "authors" => [{ "id" => "9" * 24 }],
+          "tags" => @field_control_native.fetch("tags") + [editorial],
+          "codeinjection_head" => "<!-- unrelated Ghost setting -->"
+        )
+      id =
+        native_planner(context, commands, held).prepare_publication(
+          event_id: @native_event_id
+        )
+      request =
+        JSON
+          .parse(commands.retained(id).dig("command", "request", "body_bytes"))
+          .fetch("posts")
+          .first
+      expect(request).not_to have_key("authors")
+      expect(request).not_to have_key("codeinjection_head")
+      expect(
+        JSON.parse(request.fetch("lexical")).fetch("root").fetch("children")
+      ).to include(outside)
+      expect(request.fetch("tags")).to include(editorial)
+      DiscussionBridgeGhost::NativeExecutor.new(
+        context: context,
+        journal: commands,
+        authority: held,
+        api_key: "a" * 24 + ":" + "12" * 32
+      ).execute(id)
+      expect(@field_control_native.fetch("html")).to include(
+        outside.fetch("html")
+      )
+      expect(@field_control_native.fetch("authors")).to eq(
+        [{ "id" => "9" * 24 }]
+      )
+      expect(@field_control_native.fetch("codeinjection_head")).to eq(
+        "<!-- unrelated Ghost setting -->"
+      )
+    end
+  end
+
+  it "refuses to prepare over an editor's change to a managed native title" do
+    native_stage_source_policy!
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held, complete: true)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      complete_planner_metadata(context, held)
+      @field_control_native["title"] = "Ghost editor changed the managed title"
+      expect do
+        native_planner(context, commands, held).prepare_publication(
+          event_id: @native_event_id
+        )
+      end.to raise_error(DiscussionBridgeGhost::Error)
+      expect(
+        @installation.operational_records.where(
+          kind: DiscussionBridgeGhost::NativeCommandPlanner::ENTRY
+        )
+      ).to be_empty
+      expect(
+        a_request(
+          :put,
+          "#{@target.admin_origin}/ghost/api/admin/posts/#{"a" * 24}/"
+        )
+      ).to have_been_made.once
+    end
+  end
+
+  it "plans withdrawal as status-only and never replaces the retained article or native relations" do
+    native_stage_source_policy!
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held, complete: true)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      expect(
+        native_acknowledgements(context, mutations, commands, held, lease)
+          .synchronize(event_id: @native_event_id)
+          .result
+          .status
+      ).to eq(200)
+    end
+    original = Marshal.load(Marshal.dump(@field_control_native))
+    field_control_policy!(authors: [], taxonomy: [], withdraw: true)
+    with_runtime do |context, mutations|
+      lease = claim(context, mutations, key: "claim:planned-withdrawal")
+      held = authority(context, mutations, lease)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      planner = native_planner(context, commands, held)
+      id = planner.prepare_withdrawal
+      request =
+        JSON
+          .parse(commands.retained(id).dig("command", "request", "body_bytes"))
+          .fetch("posts")
+          .first
+      expect(request.keys.sort).to eq(%w[id status updated_at])
+      expect(request.fetch("status")).to eq("draft")
+      expect(planner.prepare_withdrawal).to eq(id)
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: commands,
+          authority: held,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      executor.execute(id)
+      executor.execute(id)
+      expect(@field_control_native.except("status", "updated_at")).to eq(
+        original.except("status", "updated_at")
+      )
+      expect(@field_control_native.fetch("status")).to eq("draft")
+      expect(
+        a_request(
+          :put,
+          "#{@target.admin_origin}/ghost/api/admin/posts/#{"a" * 24}/"
+        )
+      ).to have_been_made.twice
+    end
+  end
+
+  it "prepares selected native authors and editorial tags in policy order without sending management intent to Ghost" do
+    field_control_catalogs!
+    field_control_policy!(
+      authors: ["2" * 24, "1" * 24],
+      taxonomy: ["4" * 24, "3" * 24]
+    )
+    native_stage_source_policy!
+    planned_native_fixture
+    { "users" => %w[1 2], "tags" => %w[3 4] }.each do |resource, digits|
+      items =
+        digits.map do |digit|
+          { "id" => digit * 24, "name" => "Native selected #{digit}" }.merge(
+            (
+              if resource == "users"
+                { "status" => "active" }
+              else
+                { "slug" => "selected-#{digit}" }
+              end
+            )
+          )
+        end
+      stub_request(
+        :get,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/#{resource}/\?}
+      ).to_return(
+        status: 200,
+        headers: {
+          "Content-Type" => "application/json"
+        },
+        body:
+          JSON.generate(
+            resource => items,
+            "meta" => {
+              "pagination" => {
+                "page" => 1,
+                "total" => 2,
+                "next" => nil
+              }
+            }
+          )
+      )
+    end
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      complete_planner_metadata(context, held)
+      planner = native_planner(context, commands, held)
+      executor =
+        DiscussionBridgeGhost::NativeExecutor.new(
+          context: context,
+          journal: commands,
+          authority: held,
+          api_key: "a" * 24 + ":" + "12" * 32
+        )
+      executor.execute(
+        planner.prepare_draft(
+          event_id: @native_event_id,
+          kind: "post",
+          slug: "article"
+        )
+      )
+      executor.execute(planner.prepare_publication(event_id: @native_event_id))
+      expect(
+        @field_control_native.fetch("authors").map { |item| item.fetch("id") }
+      ).to eq(["2" * 24, "1" * 24])
+      tags =
+        @field_control_native
+          .fetch("tags")
+          .reject { |tag| tag.fetch("name").start_with?("#discussionbridge-") }
+      expect(tags.map { |item| item.fetch("id") }).to eq(["4" * 24, "3" * 24])
+      expect(
+        @planned_native_writes.all? { |fields| !fields.key?("management") }
+      ).to eq(true)
     end
   end
 
