@@ -1944,6 +1944,51 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
     end
   end
 
+  it "refuses readiness while an unresolved native intent could still change the otherwise matching post" do
+    native_stage_source_policy!
+    with_runtime do |context, mutations|
+      native_stage_source(context)
+      lease = claim(context, mutations)
+      held = authority(context, mutations, lease)
+      field_control_initial_publication(context, lease, held, complete: true)
+      commands =
+        DiscussionBridgeGhost::NativeCommandJournal.new(context: context)
+      pending =
+        complete_publication_arguments(
+          context,
+          lease,
+          held,
+          @field_control_native
+        )
+      commands.prepare(**pending)
+      stages =
+        native_acknowledgements(context, mutations, commands, held, lease)
+      expect { stages.synchronize(event_id: @native_event_id) }.to raise_error(
+        DiscussionBridgeGhost::Error
+      )
+      expect(@work.reload.state).to eq("leased")
+      expect(
+        commands.retained(pending.fetch(:command_id)).dig("state", "completion")
+      ).to eq(nil)
+      expect(
+        commands.retained(pending.fetch(:command_id)).dig("state", "retirement")
+      ).to eq(nil)
+      expect(@installation.mutations.where(route_id: "V4-16").count).to eq(0)
+    end
+    expect(
+      a_request(
+        :post,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+      )
+    ).to have_been_made.once
+    expect(
+      a_request(
+        :put,
+        %r{#{Regexp.escape(@target.admin_origin)}/ghost/api/admin/posts/}
+      )
+    ).to have_been_made.once
+  end
+
   it "does not report an old cached acknowledgement as current after receiver-state loss" do
     native_stage_source_policy!
     with_runtime do |context, mutations|
@@ -1979,7 +2024,10 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       ).delete_all
       expect { stages.synchronize(event_id: @native_event_id) }.to raise_error(
         DiscussionBridgeGhost::Error
-      ) { |error| expect(error.code).to eq("acknowledgement_not_current") }
+      ) do |error|
+        expect(error.code).to eq("acknowledgement_not_current"),
+        error.backtrace.first(6).join("\n")
+      end
       expect(@work.reload.state).to eq("leased")
       expect(
         @installation

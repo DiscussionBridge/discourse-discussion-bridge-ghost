@@ -117,6 +117,7 @@ module DiscussionBridgeGhost
       end
       command =
         @commands.retained(baseline.value.fetch("command_id")).fetch("command")
+      assert_native_clear!(baseline, mapping)
       maximum = command.dig("request", "maximum_bytes")
       client =
         GhostAdminClient.new(
@@ -189,6 +190,7 @@ module DiscussionBridgeGhost
         end
       end
       final = current!
+      assert_native_clear!(baseline, mapping)
       unless final.fetch("work").slice(*WorkAuthority::WORK_FIELDS) ==
                work.slice(*WorkAuthority::WORK_FIELDS) &&
                final.fetch("mapping").slice(*WorkAuthority::MAPPING_FIELDS) ==
@@ -252,7 +254,11 @@ module DiscussionBridgeGhost
           )
         end
       end
-      result = retained(key)
+      # capture built this value from the actual current producers above. Do
+      # not reconstruct the entire physical history a second time merely to
+      # return the freshly committed observation. Historical reads still use
+      # retained(), including its independent dependency validation.
+      result = Observation.new(key: key, value: value)
       @evidence.retain(result, result.value)
       result
     rescue KeyError, ArgumentError, TypeError
@@ -369,6 +375,15 @@ module DiscussionBridgeGhost
 
     def row(key)
       @installation.operational_records.find_by(kind: ENTRY, record_key: key)
+    end
+
+    def assert_native_clear!(baseline, mapping)
+      @commands.assert_clear!(
+        resource_id: mapping.fetch("resource_id"),
+        kind: baseline.value.dig("identity", "kind"),
+        native_id: @native_id,
+        slugs: [baseline.value.dig("scalars", "slug")]
+      )
     end
 
     def qualify_publication!(

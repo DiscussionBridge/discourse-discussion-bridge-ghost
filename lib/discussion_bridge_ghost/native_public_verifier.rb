@@ -137,6 +137,21 @@ module DiscussionBridgeGhost
       end
       @context.protocol.validate!("Verification", verification)
       guard.call
+      current_baseline =
+        NativeBaselineJournal.new(
+          context: @context,
+          journal: @commands
+        ).current(value.dig("mapping", "mapping_id"))
+      unless current_baseline &&
+               current_baseline.sha256 == value.fetch("baseline_sha256")
+        raise Error.new("identity_conflict")
+      end
+      @commands.assert_clear!(
+        resource_id: value.dig("mapping", "resource_id"),
+        kind: current_baseline.value.dig("identity", "kind"),
+        native_id: native_id,
+        slugs: [current_baseline.value.dig("scalars", "slug")]
+      )
       observation =
         Observation.new(
           readiness: readiness,

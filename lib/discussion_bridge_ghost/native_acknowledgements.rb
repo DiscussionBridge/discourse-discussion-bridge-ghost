@@ -182,7 +182,10 @@ module DiscussionBridgeGhost
               )
           )
         end
-        previous = retained(stage)
+        # The exact packet and genuine readiness were checked while building
+        # this immutable intent. A restart uses retained() and revalidates all
+        # historical dependencies; this invocation keeps its actual value.
+        previous = value
       end
       @authority.guard!(
         operation: stage == "synchronized" ? :mutate : :verify,
