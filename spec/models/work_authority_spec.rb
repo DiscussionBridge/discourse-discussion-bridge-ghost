@@ -2856,6 +2856,9 @@ RSpec.describe DiscussionBridgeGhost::WorkAuthority do
       expect(request.keys.sort).to eq(%w[id status updated_at])
       expect(request.fetch("status")).to eq("draft")
       expect(planner.prepare_withdrawal).to eq(id)
+      expect(native_planner(context, commands, held).prepare_withdrawal).to eq(
+        id
+      )
       executor =
         DiscussionBridgeGhost::NativeExecutor.new(
           context: context,

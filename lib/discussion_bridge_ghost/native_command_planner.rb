@@ -177,7 +177,9 @@ module DiscussionBridgeGhost
 
     def prepare_withdrawal
       bind!("withdraw")
-      return enroll(prior) if (prior = retained)
+      if (prior = retained)
+        return enroll(prior)
+      end
       @management = @authority.native_management!(stage: @stage)
       baseline, native = owned_native
       fields = {
