@@ -7,7 +7,7 @@ const vm = require("node:vm");
 
 const loader = fs.readFileSync(path.join(__dirname, "../public/comments.js"), "utf8");
 
-function runLoader(fetch, mode = null) {
+function runLoader(fetch, mode = null, { managed = true, inArticle = false } = {}) {
   const link = { textContent: "Open discussion" };
   const snapshot = { textContent: "a reply removed by moderation" };
   const block = {
@@ -16,18 +16,30 @@ function runLoader(fetch, mode = null) {
     replaceChildren(...children) { this.children = children; },
     setAttribute(name, value) { this[name] = value; },
   };
+  const mounted = [];
+  const article = {};
   const document = {
-    currentScript: { src: "https://forum.example/ghost/comments.js", getAttribute: () => mode },
+    currentScript: {
+      src: "https://forum.example/ghost/comments.js",
+      getAttribute: () => mode,
+      closest: () => inArticle ? article : null,
+      before: (section) => mounted.push(section),
+    },
     readyState: "complete",
-    querySelector: (selector) => selector.startsWith("script[") ? null : {},
-    querySelectorAll: () => [block],
-    createElement: (tag) => ({ tag, children: [], append(child) { this.children.push(child); } }),
+    querySelector: (selector) => selector === "main article, article" ? article : null,
+    querySelectorAll: () => managed ? [block] : [],
+    createElement: (tag) => ({
+      tag, children: [],
+      append(...children) { this.children.push(...children); },
+      replaceChildren(...children) { this.children = children; },
+      setAttribute(name, value) { this[name] = value; },
+    }),
   };
   vm.runInNewContext(loader, {
     document, URL, fetch,
     location: { protocol: "https:", origin: "https://ghost.example", pathname: "/article/" },
   });
-  return { block, link };
+  return { block, link, mounted };
 }
 
 test("removes a legacy moderated reply before a failed live request finishes", async () => {
@@ -58,6 +70,9 @@ test("refreshes the existing block from live replies alone", async () => {
   assert.equal(block["data-discussion-bridge-ghost-comments"], "loaded");
   assert.deepEqual(block.children[1].children.map((reply) => reply.textContent), ["currently visible reply"]);
   assert.equal(block.children[2].href, "https://forum.example/t/source/54");
+  assert.equal(block.children[3].children[0], "Connected by ");
+  assert.equal(block.children[3].children[1].href, "https://discussionbridge.dev/");
+  assert.equal(block.children[3].children[1].textContent, "DiscussionBridge");
 });
 
 test("an article that opts into Interactive embeds the authorized topic in the native full app", async () => {
@@ -78,4 +93,17 @@ test("an Interactive article without a verified discussion never mounts a frame"
   const { block, link } = runLoader(async () => ({ ok: false, status: 404 }), "interactive");
   await new Promise(setImmediate);
   assert.deepEqual(block.children, [link]);
+});
+
+test("an Interactive source article mounts at its theme script inside the post body", async () => {
+  const { mounted } = runLoader(async () => ({
+    ok: true,
+    json: async () => ({
+      topic_id: 54, topic_path: "/t/source/54", title: "Comments", replies: [],
+      discussion: "Open discussion",
+    }),
+  }), "interactive", { managed: false, inArticle: true });
+  await new Promise(setImmediate);
+  assert.equal(mounted.length, 1);
+  assert.equal(mounted[0].children[1].tag, "iframe");
 });

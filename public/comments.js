@@ -15,7 +15,8 @@
   endpoint.searchParams.set("url", location.origin + location.pathname);
 
   async function loadComments() {
-    const article = document.querySelector("main article, article");
+    const scriptArticle = script.closest("article");
+    const article = scriptArticle || document.querySelector("main article, article");
     const simpleBlocks = document.querySelectorAll("[data-db-owner] > [data-db-mode='simple']");
     for (const block of simpleBlocks) {
       // Older publications may still contain a saved reply snapshot. Keep only the discussion link.
@@ -39,7 +40,11 @@
 
       if (!target) {
         target = document.createElement("section");
-        article.append(target);
+        if (scriptArticle) {
+          script.before(target);
+        } else {
+          article.append(target);
+        }
       }
       const heading = document.createElement("h2");
       heading.textContent = comments.title;
@@ -49,7 +54,13 @@
       const content = interactive && Number.isSafeInteger(comments.topic_id) && comments.topic_id > 0
         ? discussionFrame(comments)
         : replyList(comments);
-      target.replaceChildren(heading, content, link);
+      const credit = document.createElement("p");
+      credit.className = "discussionbridge-credit";
+      const brand = document.createElement("a");
+      brand.href = "https://discussionbridge.dev/";
+      brand.textContent = "DiscussionBridge";
+      credit.append("Connected by ", brand);
+      target.replaceChildren(heading, content, link, credit);
       target.setAttribute("data-discussion-bridge-ghost-comments", "loaded");
     } catch {
       // The saved discussion link remains available while live replies are unavailable.
