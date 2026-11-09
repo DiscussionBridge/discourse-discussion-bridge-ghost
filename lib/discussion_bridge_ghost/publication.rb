@@ -9,6 +9,21 @@ module DiscussionBridgeGhost
     # Retain the original namespace so an existing post keeps its ownership record.
     STORE = "discussionbridge-ghost-r7-post"
 
+    def self.validate_policy!(descriptor)
+      policy = descriptor.fetch("policy")
+      unless descriptor.fetch("directions").include?("from_discourse") && policy.fetch("enabled") &&
+             policy.fetch("presentation_mode") == "simple" && policy.fetch("author_ids").empty? &&
+             policy.fetch("taxonomy_ids").empty? && descriptor.dig("native_capabilities", "complete_content_supported")
+        raise Error.new("ghost_simple_publish_policy_required")
+      end
+    end
+
+    def self.validate_destination!(connection, descriptor, ghost)
+      site_url = ghost.site.fetch("url")
+      ConnectionCheck.check_site!(connection, descriptor, site_url)
+      raise Error.new("ghost_default_root_routing_required") unless ["/", ""].include?(URI.parse(site_url).path)
+    end
+
     def self.call(kind:, connection_id:, topic_id:, admin_url:, admin_key:, url_label: nil)
       connection, descriptor = ConnectionCheck.receiver(connection_id)
       ghost = GhostSite.new(admin_url, admin_key)
@@ -30,15 +45,8 @@ module DiscussionBridgeGhost
     end
 
     def call
-      policy = @descriptor.fetch("policy")
-      unless @descriptor.fetch("directions").include?("from_discourse") && policy.fetch("enabled") &&
-             policy.fetch("presentation_mode") == "simple" && policy.fetch("author_ids").empty? &&
-             policy.fetch("taxonomy_ids").empty? && @descriptor.dig("native_capabilities", "complete_content_supported")
-        raise Error.new("ghost_simple_publish_policy_required")
-      end
-      site_url = @ghost.site.fetch("url")
-      ConnectionCheck.check_site!(@connection, @descriptor, site_url)
-      raise Error.new("ghost_default_root_routing_required") unless ["", "/"].include?(URI.parse(site_url).path)
+      Publication.validate_policy!(@descriptor)
+      Publication.validate_destination!(@connection, @descriptor, @ghost)
 
       with_lock do
         @state = PluginStore.get(STORE, @key)

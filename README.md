@@ -43,4 +43,21 @@ When an owned topic becomes ineligible under the enabled R7 policy, run the same
 
 Make the topic eligible again and rerun the command to restore it. The connector verifies the retained draft and republishes the same native article at its reserved URL.
 
-Source feed polling, scheduling, Ghost-to-Discourse publishing, and operator UI are later increments.
+## Automatic publishing
+
+Enable the one-minute Discourse job for a specific Ghost Content Connection from the Rails console. The R7 From Discourse policy controls which topics it can publish. It uses the same Simple presentation and default root URL requirements as the manual command.
+
+```ruby
+require "io/console"
+DiscussionBridgeGhost::AutomaticPublishing.enable!(
+  connection_id: "connection-public-id",
+  admin_url: "https://admin.example.com",
+  admin_key: $stdin.noecho(&:gets).chomp,
+)
+```
+
+The job reads R7's eligible source intents and pending mappings in batches. It defaults to posts for new publications. Set `kind: "page"` to create pages instead. Existing publications retain their type, native ID, and public URL. Supply a new key by running `enable!` again. The key is stored encrypted on Discourse.
+
+To stop scheduling this connection, call `DiscussionBridgeGhost::AutomaticPublishing.disable!(connection_id: "connection-public-id")`.
+
+Ghost-to-Discourse publishing and operator UI are later increments.
