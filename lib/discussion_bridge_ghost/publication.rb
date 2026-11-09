@@ -483,7 +483,11 @@ module DiscussionBridgeGhost
         publish_native!(operation, article, expected)
         return
       end
-      remember_publication!(operation, article, expected)
+      if (scope = scoped_dispatch_identity)
+        reconcile_scoped_publication!(operation, expected, scope)
+      else
+        remember_publication!(operation, article, expected)
+      end
     end
 
     def current_page?(html, native_id)
@@ -498,43 +502,81 @@ module DiscussionBridgeGhost
       # later rolls back. A replacement must still reconcile the native result.
       refresh_lease!
       operation["publish_started"] = true
+      scope = scoped_dispatch_identity
+      if scope
+        operation["supervised_dispatch"] = scope
+      else
+        operation.delete("supervised_dispatch")
+      end
       save!
-      supervised_category = SupervisedScope::CURRENT.category("outbound") if @supervised
-      if @mapping["destination_native_id"] && !supervised_category
+      if @mapping["destination_native_id"] && !scope
         apply_publication!(operation, article, expected)
       else
         # Keep the source in scope while recording the supervised publication.
         # For a first write, keep receiver invalidation fenced through synchronization.
-        # NOWAIT keeps a concurrent edit from becoming a lock-order deadlock.
-        @connection.with_lock do
-          topic = Topic.lock("FOR UPDATE NOWAIT").find_by(id: @topic_id)
-          post = Post.lock("FOR UPDATE NOWAIT").find_by(topic_id: @topic_id, post_number: 1)
-          raise Error.new("source_ineligible") unless topic && post
-
+        with_publication_fence do
           refresh_lease!
-          apply_publication!(operation, article, expected, supervised_category: supervised_category)
+          apply_publication!(operation, article, expected, scope: scope)
           synchronize(operation)
         end
+      end
+    end
+
+    def with_publication_fence
+      # NOWAIT keeps a concurrent edit from becoming a lock-order deadlock.
+      @connection.with_lock do
+        topic = Topic.lock("FOR UPDATE NOWAIT").find_by(id: @topic_id)
+        post = Post.lock("FOR UPDATE NOWAIT").find_by(topic_id: @topic_id, post_number: 1)
+        raise Error.new("source_ineligible") unless topic && post
+
+        yield
       end
     rescue ActiveRecord::LockWaitTimeout
       raise Error.new("ghost_publication_busy"), cause: nil
     end
 
-    def apply_publication!(operation, article, expected, supervised_category: nil)
+    def scoped_dispatch_identity
+      category_id = SupervisedScope::CURRENT.category("outbound") if @supervised
+      return unless category_id
+
+      @state.slice("mapping_id", "native_id", "owner", "url", "external_id").merge(
+        "connection_id" => @connection.public_id, "topic_id" => @topic_id.to_i,
+        "category_id" => category_id, "resource_id" => @mapping.fetch("resource_id"),
+      )
+    end
+
+    def reconcile_scoped_publication!(operation, expected, scope)
+      unless operation["publish_started"] && operation["supervised_dispatch"] == scope
+        raise Error.new("native_restore_required")
+      end
+
+      with_publication_fence do
+        refresh_lease!
+        article = @ghost.article(@kind, @state.fetch("native_id"))
+        assert_owned!(article)
+        raise Error.new("public_verification_failed") unless target_article?(article, expected)
+
+        remember_scoped_publication!(article, expected, scope)
+        remember_publication!(operation, article, expected)
+        synchronize(operation)
+      end
+    end
+
+    def apply_publication!(operation, article, expected, scope: nil)
       operation["write_dispatched"] = true
       @ghost.publish(@kind, article, title: @source.fetch("title"), html: operation.fetch("html"))
       article = @ghost.article(@kind, article.fetch("id"))
       assert_owned!(article)
       raise Error.new("public_verification_failed") unless target_article?(article, expected)
 
-      if supervised_category
-        @state["supervised_publication"] = @state.slice("mapping_id", "native_id", "owner", "url", "external_id").merge(
-          "connection_id" => @connection.public_id, "topic_id" => @topic_id.to_i, "category_id" => supervised_category,
-          "resource_id" => @mapping.fetch("resource_id"), "digest" => expected, "revision" => @revision,
-          "native_revision" => article.fetch("updated_at"),
-        )
-      end
+      remember_scoped_publication!(article, expected, scope) if scope
       remember_publication!(operation, article, expected)
+    end
+
+    def remember_scoped_publication!(article, digest, scope)
+      @state["supervised_publication"] = scope.merge(
+        "digest" => digest, "revision" => @revision, "native_revision" => article.fetch("updated_at"),
+      )
     end
 
     def remember_publication!(operation, article, digest)

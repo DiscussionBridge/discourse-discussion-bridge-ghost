@@ -90,6 +90,29 @@ class PublicationRecoveryTest < Minitest::Test
     assert_equal "draft", state.fetch("native_baseline").fetch("status")
   end
 
+  def test_scoped_readback_rebuilds_the_withdrawal_proof_only_for_the_recorded_dispatch
+    article = owned_article
+    scope = { "connection_id" => "dbc_example", "category_id" => 21, "native_id" => article.fetch("id") }
+    events = []
+    @publisher.instance_variable_set(:@revision, "current-source")
+    @publisher.instance_variable_set(:@source, { "topic_url" => "https://discourse.example.test/t/1" })
+    stub_article(article)
+    @publisher.define_singleton_method(:with_publication_fence) { |&block| events << :locked; block.call }
+    @publisher.define_singleton_method(:refresh_lease!) { events << :renewed }
+    @publisher.define_singleton_method(:target_article?) { |seen, digest| seen == article && digest == "proved" }
+    @publisher.define_singleton_method(:synchronize) { |_operation| events << :synchronized }
+    err = assert_raises(Error) do
+      @publisher.send(:reconcile_scoped_publication!, { "publish_started" => true }, "proved", scope)
+    end
+    assert_equal "native_restore_required", err.code
+    assert_empty events
+    operation = { "publish_started" => true, "supervised_dispatch" => scope.dup }
+    @publisher.send(:reconcile_scoped_publication!, operation, "proved", scope)
+    assert_equal [:locked, :renewed, :synchronized], events
+    assert_equal scope.merge("digest" => "proved", "revision" => "current-source", "native_revision" => article.fetch("updated_at")),
+      @publisher.instance_variable_get(:@state).fetch("supervised_publication")
+  end
+
   def test_failure_code_distinguishes_permanent_public_proof_and_transient_native_errors
     cases = {
       ["public_verification_failed", 200] => "public_verification_failed",
