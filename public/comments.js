@@ -8,6 +8,10 @@
   if (endpoint.protocol !== "https:") {
     return;
   }
+  const interactive = script.getAttribute("data-discussion-bridge-ghost-mode") === "interactive";
+  if (!interactive && document.querySelector('script[data-discussion-bridge-ghost-mode="interactive"]')) {
+    return;
+  }
   endpoint.searchParams.set("url", location.origin + location.pathname);
 
   async function loadComments() {
@@ -39,24 +43,47 @@
       }
       const heading = document.createElement("h2");
       heading.textContent = comments.title;
-      const replies = document.createElement(comments.replies.length ? "ol" : "p");
-      if (comments.replies.length) {
-        for (const reply of comments.replies) {
-          const item = document.createElement("li");
-          item.textContent = reply;
-          replies.append(item);
-        }
-      } else {
-        replies.textContent = comments.empty;
-      }
       const link = document.createElement("a");
       link.href = topic.href;
       link.textContent = comments.discussion;
-      target.replaceChildren(heading, replies, link);
+      const content = interactive && Number.isSafeInteger(comments.topic_id) && comments.topic_id > 0
+        ? discussionFrame(comments)
+        : replyList(comments);
+      target.replaceChildren(heading, content, link);
       target.setAttribute("data-discussion-bridge-ghost-comments", "loaded");
     } catch {
       // The saved discussion link remains available while live replies are unavailable.
     }
+  }
+
+  function discussionFrame(comments) {
+    const url = new URL("/embed/comments", endpoint.origin);
+    url.searchParams.set("topic_id", comments.topic_id);
+    url.searchParams.set("full_app", "true");
+    const frame = document.createElement("iframe");
+    frame.src = url.href;
+    frame.title = comments.discussion;
+    frame.width = "100%";
+    frame.height = "600";
+    frame.loading = "lazy";
+    frame.referrerPolicy = "no-referrer-when-downgrade";
+    return frame;
+  }
+
+  function replyList(comments) {
+    if (!comments.replies.length) {
+      const empty = document.createElement("p");
+      empty.textContent = comments.empty;
+      return empty;
+    }
+
+    const replies = document.createElement("ol");
+    for (const reply of comments.replies) {
+      const item = document.createElement("li");
+      item.textContent = reply;
+      replies.append(item);
+    }
+    return replies;
   }
 
   if (document.readyState === "loading") {

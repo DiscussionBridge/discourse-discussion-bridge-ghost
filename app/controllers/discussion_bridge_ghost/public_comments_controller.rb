@@ -23,6 +23,7 @@ module DiscussionBridgeGhost
       response.headers["Access-Control-Allow-Origin"] = origin
       response.headers["Vary"] = [response.headers["Vary"], "Origin"].compact.join(", ")
       render json: {
+        topic_id: topic.id,
         topic_path: topic.relative_url,
         replies: PostPresentation.public_replies(topic, Guardian.new),
         title: I18n.t("discussion_bridge_ghost.comments.title"),

@@ -66,13 +66,15 @@ In Discourse Admin Site Settings, search for `discussion_bridge_ghost_sync_inter
 
 ## Public Ghost comments
 
-Add the following script to the Ghost site footer under **Settings → Code injection**, or to a single article's footer. Replace the example URL with the HTTPS URL of the Discourse site running this connector.
+Add the following script to the Ghost post or page where you want a discussion. Paste it into an HTML card or the article's own Code injection header. Replace the example URL with the HTTPS URL of the Discourse site running this connector. The discussion renders within the article.
 
 ```html
 <script defer src="https://discourse.example.com/discussion-bridge-ghost/comments.js"></script>
 ```
 
 The loader uses the current Ghost article URL to find its R7 discussion and shows up to 50 guest-visible replies. It supports Ghost articles imported into Discourse and Simple articles published from Discourse. The reader can open the linked topic to join the discussion.
+
+For the Interactive frame, add `data-discussion-bridge-ghost-mode="interactive"` to that article's script tag. The frame opens the linked topic in Discourse's native full app. In Discourse's Embedding settings, allow the Ghost hostname and enable the full app embed. The publication mode on the R7 connection still controls the published article. The script option controls the discussion inside Ghost.
 
 Ghost keeps only the discussion link in new outbound publications. The loader verifies the current Ghost article and gets live replies from Discourse. Outbound live replies require the connection's saved Ghost outbound credential to verify the public article by native ID. When that credential is unavailable, the article retains its discussion link. An earlier connector may have stored replies in the Ghost HTML. If any of those articles are still served, have an authorized operator remove the old reply bodies from Ghost before relying on this loader for moderation.
 
