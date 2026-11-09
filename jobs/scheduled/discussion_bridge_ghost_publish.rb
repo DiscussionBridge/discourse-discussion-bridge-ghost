@@ -14,8 +14,11 @@ module Jobs
       interval = SiteSetting.discussion_bridge_ghost_sync_interval_minutes.minutes.to_i
       return unless Discourse.redis.set(CADENCE_KEY, "1", nx: true, ex: interval)
 
-      DiscussionBridgeGhost::AutomaticPublishing.run
-      DiscussionBridgeGhost::InboundPublishing.run
+      [DiscussionBridgeGhost::AutomaticPublishing, DiscussionBridgeGhost::InboundPublishing].each do |publisher|
+        publisher.run
+      rescue StandardError => error
+        Rails.logger.error("DiscussionBridge Ghost schedule failed publisher=#{publisher.name} error=#{error.class}")
+      end
     end
   end
 end

@@ -11,16 +11,34 @@ module DiscussionBridgeGhost
       guardian = Guardian.new
       raise Error.new("source_ineligible") unless guardian.can_see_topic?(topic)
 
-      replies = public_replies(topic, guardian).map { |text| "<li>#{CGI.escapeHTML(text)}</li>" }
-      comments = replies.empty? ? "<p>No comments yet.</p>" : "<ol>#{replies.join}</ol>"
       link = CGI.escapeHTML(source.fetch("topic_url"))
       revision = CGI.escapeHTML(source.fetch("source_revision"))
       <<~HTML.chomp
         <section data-db-owner="#{owner}" data-db-resource="#{resource}" data-db-native="#{native_id}" data-db-revision="#{revision}">
         <div data-db-article="true">#{article}</div>
-        <section data-db-mode="simple"><h2>Comments</h2>#{comments}<a data-db-discussion="true" href="#{link}">Open discussion</a></section>
+        <section data-db-mode="simple"><a data-db-discussion="true" href="#{link}">Open discussion</a></section>
         </section>
       HTML
+    end
+
+    def self.current_page?(html, owner:, resource:, native_id:, revision:)
+      return false unless html.is_a?(String) && html.valid_encoding?
+
+      fragments = Nokogiri::HTML5.fragment(html).css("section[data-db-owner]").select do |fragment|
+        fragment["data-db-owner"] == owner
+      end
+      return false unless fragments.one?
+
+      fragment = fragments.first
+      return false unless fragment["data-db-resource"] == resource &&
+        fragment["data-db-native"] == native_id && fragment["data-db-revision"] == revision
+
+      simple = fragment.element_children.select { |child| child["data-db-mode"] == "simple" }
+      return false unless simple.one?
+
+      link = simple.first.element_children.first
+      simple.first.element_children.one? && link.name == "a" && link["data-db-discussion"] == "true" &&
+        simple.first.children.all? { |child| child == link || (child.text? && child.text.strip.empty?) }
     end
 
     def self.public_replies(topic, guardian)

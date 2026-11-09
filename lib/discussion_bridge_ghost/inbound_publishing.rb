@@ -35,9 +35,42 @@ module DiscussionBridgeGhost
       raise Error.new("ghost_inbound_direction_required") unless descriptor.fetch("directions").include?("to_discourse")
     end
 
+    def self.current_source?(binding)
+      identity = /\Aghost-(post|page):([0-9a-f]{24})\z/.match(binding.external_id)
+      return false unless identity
+
+      connection_id = binding.content_connection.public_id
+      encrypted = PluginStore.get(SETTINGS, connection_id)
+      return false unless encrypted
+
+      options = ::DiscussionBridge::CmsReceiptCipher.decrypt(encrypted)
+      return false unless options.is_a?(Hash)
+
+      tag = options.fetch("tag")
+      ghost = GhostSite.new(options.fetch("admin_url"), content_key: options.fetch("content_key"))
+      entry = ghost.public_entry(identity[1], id: identity[2], tag: tag)
+      return false unless visible_entry?(entry, tag) && entry["id"] == identity[2] && entry["url"].is_a?(String)
+
+      canonical = ::DiscussionBridge::CanonicalSource.call(connection_id: connection_id, source_url: entry["url"]).source_url
+      canonical == binding.canonical_url && PluginStore.get(SETTINGS, connection_id) == encrypted
+    rescue KeyError, TypeError
+      false
+    end
+
+    def self.visible_entry?(entry, tag)
+      entry.is_a?(Hash) && entry["visibility"] == "public" && entry["access"] == true &&
+        entry["tags"].is_a?(Array) && entry["tags"].any? { |item| item.is_a?(Hash) && item["slug"] == tag }
+    end
+
     def self.run
+      return unless SupervisedScope::CURRENT.active?("inbound") && !Discourse.readonly_mode?
+
       PluginStoreRow.where(plugin_name: SETTINGS).find_each do |row|
+        next unless SupervisedScope::CURRENT.connection?("inbound", row.key)
+
         new(row.key).run
+      rescue StandardError => error
+        Rails.logger.error("DiscussionBridge Ghost inbound connection=#{row.key} error=#{error.class}")
       end
     end
 
@@ -46,6 +79,8 @@ module DiscussionBridgeGhost
     end
 
     def run
+      return unless SupervisedScope::CURRENT.connection?("inbound", @connection_id)
+
       encrypted = PluginStore.get(SETTINGS, @connection_id)
       return unless encrypted
 
@@ -53,6 +88,8 @@ module DiscussionBridgeGhost
       self.class.validate_direction!(@descriptor)
       options = ::DiscussionBridge::CmsReceiptCipher.decrypt(encrypted)
       @tag = options.fetch("tag")
+      return unless inbound_scope?
+
       @ghost = GhostSite.new(options.fetch("admin_url"), content_key: options.fetch("content_key"))
       ConnectionCheck.check_site!(@connection, @descriptor, @ghost.site.fetch("url"))
       @records = ::DiscussionBridge::CmsRecordStore.new(@connection)
@@ -78,8 +115,7 @@ module DiscussionBridgeGhost
 
     def publish(kind, entry)
       id = entry.fetch("id")
-      return unless entry["visibility"] == "public" && entry["access"] == true &&
-        Array(entry["tags"]).any? { |tag| tag.is_a?(Hash) && tag["slug"] == @tag }
+      return unless self.class.visible_entry?(entry, @tag)
       html = entry.fetch("html")
       return unless html.is_a?(String) && !html.include?("<!--members-only-->")
       # Skip Ghost articles already owned by a Discourse publication.
@@ -100,7 +136,9 @@ module DiscussionBridgeGhost
       input = { "mutation_id" => SecureRandom.uuid, "bridge_record" => source }
       raise Error.new("body_too_large") if JSON.generate(input).bytesize > 65_536
 
-      response = @records.resolve(input)
+      response = resolve(input)
+      return unless response
+
       log(response.body.fetch("reason"), id) unless [200, 201].include?(response.status)
     rescue ::DiscussionBridge::CmsProtocol::Error => error
       if input && %w[invalid_field content_preservation_unavailable].include?(error.code)
@@ -117,7 +155,45 @@ module DiscussionBridgeGhost
       log("ghost_source_metadata_invalid", id)
     end
 
+    def inbound_scope?
+      scope = SupervisedScope::CURRENT
+      return true unless scope.category("inbound")
+
+      descriptor = ::DiscussionBridge::CmsConfiguration.current!(@connection, required_direction: "to_discourse")
+      lane = ::DiscussionBridge::LanePolicies.resolve(
+        value: SiteSetting.discussion_bridge_lane_policies, lane: descriptor.fetch("publication_lane"),
+      )
+      category_id = lane.category_id || @connection.default_category_id || SiteSetting.discussion_bridge_effective_category_id
+      lane.allowed && scope.inbound?(@connection_id, category_id.to_i, @tag)
+    end
+
+    def resolve(input)
+      category_id = SupervisedScope::CURRENT.category("inbound")
+      return @records.resolve(input) unless category_id
+
+      @connection.with_lock do
+        next unless inbound_scope?
+
+        external_id = input.fetch("bridge_record").fetch("external_id")
+        existing = @connection.content_bindings.find_by(external_id: external_id)
+        if existing
+          topic = Topic.lock.find_by(id: existing.bridge_record.topic_id)
+          next unless topic&.category_id == category_id
+        end
+
+        response = @records.resolve(input)
+        if [200, 201].include?(response.status) &&
+           !Topic.exists?(id: response.body.fetch("topic_id"), category_id: category_id)
+          raise Error.new("ghost_supervised_scope_changed")
+        end
+        response
+      end
+    end
+
     def source_record(kind, entry, fragment)
+      unless %w[url title created_at updated_at].all? { |field| entry[field].is_a?(String) }
+        raise Error.new("ghost_source_metadata_invalid")
+      end
       canonical = ::DiscussionBridge::CanonicalSource.call(
         connection_id: @connection_id, source_url: entry.fetch("url"),
       ).source_url

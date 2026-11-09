@@ -12,9 +12,12 @@
 
   async function loadComments() {
     const article = document.querySelector("main article, article");
-    let target = document.querySelector(
-      "[data-discussion-bridge-ghost-comments], [data-db-owner] [data-db-mode='simple']"
-    );
+    const simpleBlocks = document.querySelectorAll("[data-db-owner] > [data-db-mode='simple']");
+    for (const block of simpleBlocks) {
+      // Older publications may still contain a saved reply snapshot. Keep only the discussion link.
+      block.replaceChildren(...block.querySelectorAll(":scope > a[data-db-discussion='true']"));
+    }
+    let target = simpleBlocks[0] || document.querySelector("[data-discussion-bridge-ghost-comments]");
     if (!target && !article) {
       return;
     }
@@ -52,7 +55,7 @@
       target.replaceChildren(heading, replies, link);
       target.setAttribute("data-discussion-bridge-ghost-comments", "loaded");
     } catch {
-      // A public read failure leaves the article and its existing links intact.
+      // The saved discussion link remains available while live replies are unavailable.
     }
   }
 

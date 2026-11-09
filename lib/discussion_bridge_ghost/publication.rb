@@ -1,13 +1,17 @@
 # frozen_string_literal: true
 
 require "digest"
+require "json"
 require "securerandom"
 require "time"
+require_relative "publication_attention"
 
 module DiscussionBridgeGhost
   class Publication
+    include PublicationAttention
     # Retain the original namespace so an existing post keeps its ownership record.
     STORE = "discussionbridge-ghost-r7-post"
+    RECOVERY_HISTORY = "#{STORE}-recovery-history"
 
     def self.validate_policy!(descriptor)
       policy = descriptor.fetch("policy")
@@ -24,13 +28,19 @@ module DiscussionBridgeGhost
       raise Error.new("ghost_default_root_routing_required") unless ["/", ""].include?(URI.parse(site_url).path)
     end
 
-    def self.call(kind:, connection_id:, topic_id:, admin_url:, admin_key:, url_label: nil)
+    def self.call(kind:, connection_id:, topic_id:, admin_url:, admin_key:, url_label: nil, supervised: false)
       connection, descriptor = ConnectionCheck.receiver(connection_id)
       ghost = GhostSite.new(admin_url, admin_key)
-      new(connection, descriptor, ghost, topic_id, url_label, kind).call
+      new(connection, descriptor, ghost, topic_id, url_label, kind, supervised: supervised).call
     end
 
-    def initialize(connection, descriptor, ghost, topic_id, url_label, kind)
+    def self.inspect_attention(kind:, connection_id:, topic_id:, admin_url:, admin_key:, inspection_id:, supervised: false)
+      connection, descriptor = ConnectionCheck.receiver(connection_id)
+      ghost = GhostSite.new(admin_url, admin_key)
+      new(connection, descriptor, ghost, topic_id, nil, kind, supervised: supervised).inspect_attention(inspection_id)
+    end
+
+    def initialize(connection, descriptor, ghost, topic_id, url_label, kind, supervised: false)
       raise Error.new("ghost_kind_invalid") unless GhostSite::COLLECTIONS.key?(kind)
       @connection = connection
       @descriptor = descriptor
@@ -39,6 +49,7 @@ module DiscussionBridgeGhost
       @source_id = "topic:#{@topic_id}"
       @kind = kind
       @url_label = url_label
+      @supervised = supervised
       @key = "#{connection.public_id}:#{@topic_id}"
       @mapping_service = ::DiscussionBridge::CmsMappingService.new(connection)
       @work = ::DiscussionBridge::CmsWorkCoordinator.new(connection)
@@ -49,6 +60,7 @@ module DiscussionBridgeGhost
       Publication.validate_destination!(@connection, @descriptor, @ghost)
 
       with_lock do
+        check_supervised_scope!
         @state = PluginStore.get(STORE, @key)
         if @state && @state.fetch("kind", "post") != @kind
           raise Error.new("native_ownership_conflict")
@@ -62,12 +74,21 @@ module DiscussionBridgeGhost
           @source = intent.source_revisions.find_by!(source_revision: intent.current_source_revision).source_metadata
           @revision = @source.fetch("source_revision")
           @state ||= initialize_ownership
-        elsif intent&.state == "revoked" && @state&.fetch("verified", nil)
+        elsif intent&.state == "revoked" && @state&.fetch("mapping_id", nil)
           @action = "withdraw"
         else
           raise Error.new("receiver_source_ineligible")
         end
         @mapping = mapping
+        if withdrawing? && !@mapping["destination_native_id"]
+          # R7 has no withdraw work for an unacknowledged native identity.
+          # Keep the journal and the receiver's attention state for reconciliation.
+          operation = @state["operation"] || {}
+          if operation["publish_started"] || operation.dig("prior", "publish_started")
+            raise Error.new("ghost_unacknowledged_publication")
+          end
+          raise Error.new("receiver_source_ineligible")
+        end
         if settled?
           verify_settled!
           next result
@@ -75,12 +96,19 @@ module DiscussionBridgeGhost
 
         operation = current_operation
         @lease = lease_for(operation)
-        if withdrawing?
-          prepare_withdrawal(operation)
-        else
-          prepare_native(operation)
+        replay_pending_failure!(operation)
+        begin
+          reconcile_pending!(operation)
+          if withdrawing?
+            prepare_withdrawal(operation)
+          else
+            prepare_native(operation)
+          end
+          acknowledge(operation)
+        rescue Error => error
+          report_failure(operation, error)
+          raise
         end
-        acknowledge(operation)
         result
       end
     end
@@ -89,6 +117,15 @@ module DiscussionBridgeGhost
 
     def withdrawing?
       @action == "withdraw"
+    end
+
+    def check_supervised_scope!
+      return unless @supervised
+
+      category_id = Topic.where(id: @topic_id).pick(:category_id)
+      unless SupervisedScope::CURRENT.outbound?(@connection.public_id, category_id)
+        raise Error.new("ghost_supervised_scope_denied")
+      end
     end
 
     def settled?
@@ -126,7 +163,7 @@ module DiscussionBridgeGhost
     end
 
     def save!
-      PluginStore.set(STORE, @key, @state)
+      raise Error.new("ghost_publication_storage_failed") unless PluginStore.set(STORE, @key, @state)
     end
 
     def mapping
@@ -155,36 +192,125 @@ module DiscussionBridgeGhost
     end
 
     def current_operation
+      mapping = DiscussionBridgeCmsMapping.find_by!(
+        content_connection_id: @connection.id, mapping_id: @mapping.fetch("mapping_id"),
+      )
+      @current_work = mapping.work_items.where(
+        action: @action, source_revision: @revision,
+        policy_revision: @descriptor.fetch("policy").fetch("policy_revision"),
+      ).order(created_at: :desc, id: :desc).first
+      raise Error.new("receiver_work_unavailable", status: 204) unless @current_work
+
       previous = @state["operation"]
-      previous_action = previous&.fetch("action", "publish_revision")
-      return previous if previous_action == @action && previous.fetch("revision") == @revision
-      if previous && !completed_operation?(previous)
-        raise Error.new("ghost_prior_publication_unresolved")
+      if previous
+        prior_id = recorded_work_id(previous)
+        if prior_id == @current_work.work_id || (prior_id.nil? &&
+            previous.fetch("action", "publish_revision") == @action && previous["revision"] == @revision)
+          previous["work_id"] = @current_work.work_id
+          return previous
+        end
       end
 
-      @state["operation"] = { "action" => @action, "revision" => @revision, "restore" => previous_action == "withdraw" }
+      @state["operation"] = {
+        "action" => @action, "revision" => @revision, "work_id" => @current_work.work_id,
+        "restore" => native_baseline&.fetch("status", nil) == "draft",
+      }
+      if previous
+        @state.fetch("operation")["prior"] = previous["prior"] || previous
+      end
       save!
       @state.fetch("operation")
     end
 
-    def completed_operation?(operation)
-      return false unless operation["lease"]
-      prior = ::DiscussionBridge::CmsReceiptCipher.decrypt(operation.fetch("lease"))
-      work_id = prior.fetch("work").fetch("work_id")
-      receiver("V4-14") { @work.query(work_id).body.fetch("work").fetch("state") == "verified" }
+    def recorded_work_id(operation)
+      return operation["work_id"] if operation["work_id"]
+      return unless operation["lease"]
+
+      ::DiscussionBridge::CmsReceiptCipher.decrypt(operation.fetch("lease")).fetch("work").fetch("work_id")
+    end
+
+    def reconcile_pending!(operation)
+      return unless (previous = operation["prior"])
+
+      prior_id = recorded_work_id(previous)
+      prior = @current_work.cms_mapping.work_items.find_by(work_id: prior_id) if prior_id
+      if prior_id && (!prior || !DiscussionBridgeCmsWork::TERMINAL_STATES.include?(prior.state))
+        raise Error.new("ghost_prior_publication_unresolved")
+      end
+      reconcile_prior!(previous, prior)
+      retain_recovery_history!(previous, prior_id) if prior_id && @current_work.retry_of_work_id
+      operation["restore"] = native_baseline&.fetch("status", nil) == "draft"
+      operation.delete("prior")
+      save!
+    end
+
+    def retain_recovery_history!(operation, work_id)
+      key = "#{@key}:#{work_id}"
+      existing = PluginStore.get(RECOVERY_HISTORY, key)
+      return if existing == operation
+
+      if existing || !PluginStore.set(RECOVERY_HISTORY, key, operation)
+        raise Error.new("ghost_publication_storage_failed")
+      end
+    end
+
+    def reconcile_prior!(operation, work)
+      return unless operation["publish_started"] || operation["withdraw_started"]
+
+      article = @ghost.article(@kind, @state.fetch("native_id"))
+      assert_owned!(article)
+      if operation["publish_started"]
+        source = work&.source_snapshot
+        source_url = operation["source_url"] || source&.fetch("topic_url")
+        title = operation["title"] || source&.fetch("title")
+        if source_url && title && operation["html"]
+          expected = fragment_digest(operation.fetch("html"), source_url: source_url)
+          if article["status"] == "published" && article["url"] == @state.fetch("url") &&
+             article["title"] == title && matching_fragment?(article.fetch("html"), expected, source_url)
+            remember_native!(article, source_url: source_url, digest: expected, revision: operation.fetch("revision"))
+            return
+          end
+        end
+      elsif article["status"] == "draft"
+        assert_withdrawn!(article)
+        baseline = native_baseline
+        remember_native!(article, source_url: baseline.fetch("source_url"), digest: baseline.fetch("digest"),
+                         revision: baseline.fetch("revision"))
+        return
+      end
+
+      # The earlier request may have failed before its native write. Prove the
+      # old baseline as well; an ownership marker alone does not prove content.
+      if native_baseline&.fetch("status", nil) == "draft"
+        assert_withdrawn!(article)
+      else
+        assert_baseline!(article)
+      end
+    end
+
+    def matching_fragment?(html, digest, source_url)
+      fragment_digest(html, source_url: source_url) == digest
+    rescue Error => error
+      raise unless error.code == "public_verification_failed"
+
+      false
     end
 
     def lease_for(operation)
       if (encrypted = operation["lease"])
         lease = ::DiscussionBridge::CmsReceiptCipher.decrypt(encrypted)
-        return lease if Time.iso8601(lease.fetch("expires_at")) > Time.now
+        if DiscussionBridgeCmsWork::LIVE_STATES.include?(@current_work.state) &&
+           @current_work.lease_generation == lease.fetch("lease_generation") &&
+           Time.iso8601(lease.fetch("expires_at")) > Time.now
+          return lease
+        end
         operation.delete("lease")
         operation.delete("claim_id")
       end
 
       id = operation["claim_id"] ||= SecureRandom.uuid
       save!
-      response = receiver("V4-13") { @work.claim({ "mutation_id" => id, "mapping_id" => @mapping.fetch("mapping_id") }) }
+      response = claim_current_work(id)
       if response.status == 204
         operation.delete("claim_id")
         save!
@@ -192,12 +318,33 @@ module DiscussionBridgeGhost
       end
       lease = response.body
       work = lease.fetch("work")
-      unless work.fetch("action") == @action && work.fetch("source_revision") == @revision
+      unless work.fetch("work_id") == @current_work.work_id && work.fetch("action") == @action &&
+             work.fetch("source_revision") == @revision
         raise Error.new("receiver_unexpected_work")
       end
       operation["lease"] = ::DiscussionBridge::CmsReceiptCipher.encrypt(lease)
       save!
       lease
+    end
+
+    def claim_current_work(mutation_id)
+      if @current_work.retry_of_work_id
+        # The in-process connector reads the immutable positive recovery
+        # handoff for this successor directly. The receiver still fences claim.
+        recovery = DiscussionBridgeCmsAttentionRecovery.find_by!(
+          content_connection_id: @connection.id, cms_mapping_id: @current_work.cms_mapping_id,
+          successor_work_id: @current_work.id,
+        )
+        receiver("V4-36") do
+          ::DiscussionBridge::CmsAttentionRecovery.new(@connection).claim(
+            recovery.recovery_id, { "mutation_id" => mutation_id, "work_id" => @current_work.work_id },
+          )
+        end
+      else
+        receiver("V4-13") do
+          @work.claim({ "mutation_id" => mutation_id, "mapping_id" => @mapping.fetch("mapping_id") })
+        end
+      end
     end
 
     def authority
@@ -206,6 +353,7 @@ module DiscussionBridgeGhost
     end
 
     def refresh_lease!
+      check_supervised_scope!
       payload = { "mutation_id" => SecureRandom.uuid, "authority" => authority }
       @lease = receiver("V4-15") { @work.renew(authority.fetch("work_id"), payload).body }
       @state.fetch("operation")["lease"] = ::DiscussionBridge::CmsReceiptCipher.encrypt(@lease)
@@ -267,14 +415,23 @@ module DiscussionBridgeGhost
     end
 
     def prepare_native(operation)
+      if operation["html"] && !current_page?(operation.fetch("html"), @state.fetch("native_id"))
+        # Never dispatch a journaled legacy representation that saved replies.
+        # An earlier native write still needs its original digest for recovery.
+        raise Error.new("native_restore_required") if operation["publish_started"]
+        operation.delete("html")
+      end
       source_html = article_bytes unless operation["html"]
       article = native_article
       unless operation["html"]
         operation["html"] = PostPresentation.render(
           @source, source_html, owner: @state.fetch("owner"), resource: @mapping.fetch("resource_id"), native_id: article.fetch("id"),
         )
+        operation["source_url"] = @source.fetch("topic_url")
+        operation["title"] = @source.fetch("title")
         save!
       end
+      raise Error.new("public_verification_failed") unless current_page?(operation.fetch("html"), article.fetch("id"))
       expected = fragment_digest(operation.fetch("html"))
       if target_article?(article, expected)
         if operation["restore"] && !operation["publish_started"]
@@ -287,16 +444,66 @@ module DiscussionBridgeGhost
         else
           assert_baseline!(article)
         end
-        refresh_lease!
-        operation["publish_started"] = true
-        save!
-        @ghost.publish(@kind, article, title: @source.fetch("title"), html: operation.fetch("html"))
-        article = @ghost.article(@kind, article.fetch("id"))
-        assert_owned!(article)
-        raise Error.new("public_verification_failed") unless target_article?(article, expected)
+        publish_native!(operation, article, expected)
+        return
       end
+      remember_publication!(operation, article, expected)
+    end
+
+    def current_page?(html, native_id)
+      PostPresentation.current_page?(
+        html, owner: @state.fetch("owner"), resource: @mapping.fetch("resource_id"),
+        native_id: native_id, revision: @revision,
+      )
+    end
+
+    def publish_native!(operation, article, expected)
+      # Write the intent before dispatch, even if the lock transaction below
+      # later rolls back. A replacement must still reconcile the native result.
+      refresh_lease!
+      operation["publish_started"] = true
+      save!
+      if @mapping["destination_native_id"]
+        apply_publication!(operation, article, expected)
+      else
+        # For the first public write, serialize receiver invalidation and the
+        # normal source-row edits through synchronization of the native ID.
+        # NOWAIT keeps a concurrent edit from becoming a lock-order deadlock.
+        @connection.with_lock do
+          topic = Topic.lock("FOR UPDATE NOWAIT").find_by(id: @topic_id)
+          post = Post.lock("FOR UPDATE NOWAIT").find_by(topic_id: @topic_id, post_number: 1)
+          raise Error.new("source_ineligible") unless topic && post
+
+          refresh_lease!
+          apply_publication!(operation, article, expected)
+          synchronize(operation)
+        end
+      end
+    rescue ActiveRecord::LockWaitTimeout
+      raise Error.new("ghost_publication_busy"), cause: nil
+    end
+
+    def apply_publication!(operation, article, expected)
+      operation["write_dispatched"] = true
+      @ghost.publish(@kind, article, title: @source.fetch("title"), html: operation.fetch("html"))
+      article = @ghost.article(@kind, article.fetch("id"))
+      assert_owned!(article)
+      raise Error.new("public_verification_failed") unless target_article?(article, expected)
+
+      remember_publication!(operation, article, expected)
+    end
+
+    def remember_publication!(operation, article, digest)
       operation["native_revision"] = article.fetch("updated_at")
-      operation["digest"] = expected
+      operation["digest"] = digest
+      remember_native!(article, source_url: @source.fetch("topic_url"), digest: digest, revision: @revision)
+    end
+
+    def remember_native!(article, source_url:, digest:, revision:)
+      @state["native_baseline"] = {
+        "status" => article.fetch("status"), "title" => article.fetch("title"), "source_url" => source_url,
+        "digest" => digest, "revision" => revision, "native_revision" => article.fetch("updated_at"),
+      }
       save!
     end
 
@@ -304,7 +511,9 @@ module DiscussionBridgeGhost
       article = @ghost.article(@kind, @state.fetch("native_id"))
       assert_owned!(article)
       if article["status"] == "draft"
-        raise Error.new("native_ownership_conflict") unless operation["withdraw_started"]
+        unless operation["withdraw_started"] || native_baseline&.fetch("status", nil) == "draft"
+          raise Error.new("native_ownership_conflict")
+        end
       else
         assert_baseline!(article)
         refresh_lease!
@@ -316,7 +525,9 @@ module DiscussionBridgeGhost
       end
       assert_withdrawn!(article)
       operation["native_revision"] = article.fetch("updated_at")
-      save!
+      baseline = native_baseline
+      remember_native!(article, source_url: baseline.fetch("source_url"), digest: baseline.fetch("digest"),
+                       revision: baseline.fetch("revision"))
     end
 
     def assert_withdrawn!(article)
@@ -330,13 +541,19 @@ module DiscussionBridgeGhost
     end
 
     def retained_article?(article)
-      baseline = @state.fetch("verified")
-      article["title"] == baseline.fetch("title") &&
+      baseline = native_baseline
+      baseline && article["title"] == baseline.fetch("title") &&
         fragment_digest(article.fetch("html"), source_url: baseline.fetch("source_url")) == baseline.fetch("digest")
     end
 
+    def native_baseline
+      @state["native_baseline"] || @state["verified"]&.merge(
+        "status" => @mapping["mapping_state"] == "withdrawn" ? "draft" : "published",
+      )
+    end
+
     def assert_baseline!(article)
-      if @state["verified"]
+      if native_baseline
         valid = article["status"] == "published" && article["url"] == @state.fetch("url") && retained_article?(article)
       else
         marker = %(<section data-db-owner="#{@state.fetch('owner')}"></section>)
@@ -371,25 +588,88 @@ module DiscussionBridgeGhost
       status
     end
 
-    def acknowledge(operation)
+    def synchronize(operation)
       work_id = authority.fetch("work_id")
-      receipt = ownership_receipt
-      operation["receipt"] = receipt
-      save!
-
       status = receiver("V4-14") { @work.query(work_id).body.fetch("work").fetch("state") }
       if status == "leased"
+        receipt = ownership_receipt
+        operation["receipt"] = receipt
+        save!
         send_ack(work_id, "synchronized", "native_result", native_result(operation, receipt))
       elsif status != "synchronized"
         raise Error.new("receiver_unexpected_work_state")
       end
+    end
 
+    def acknowledge(operation)
+      synchronize(operation)
       verification = public_verification(operation)
-      @mapping = send_ack(work_id, "verified", "verification", verification).fetch("mapping")
+      @mapping = send_ack(authority.fetch("work_id"), "verified", "verification", verification).fetch("mapping")
+    end
+
+    def report_failure(operation, error)
+      code = failure_code(error)
+      return unless code
+
+      # If a dispatch failed before readback, native state may have changed.
+      # Keep that possibility visible and reconcile the journal before retry.
+      generation = authority.fetch("lease_generation").to_s
+      failures = operation["failures"] ||= {}
+      request = if failures[generation]
+        ::DiscussionBridge::CmsReceiptCipher.decrypt(failures.fetch(generation))
+      else
+        payload = {
+          "mutation_id" => SecureRandom.uuid, "authority" => authority, "code" => code,
+          "native_change_applied" => !!(operation["write_dispatched"] || operation["withdraw_started"] ||
+            @state["draft_dispatch_started"] && !@mapping["destination_native_id"]),
+          "safe_detail" => nil, "retry_after_seconds" => nil,
+        }
+        failures[generation] = ::DiscussionBridge::CmsReceiptCipher.encrypt(payload)
+        save!
+        payload
+      end
+      submit_failure(request)
+    rescue Error => report_error
+      # Stale authority must not turn into an unscoped failure report.
+      Rails.logger.warn("DiscussionBridge Ghost work failure report code=#{report_error.code}")
+    end
+
+    def replay_pending_failure!(operation)
+      request = operation.dig("failures", authority.fetch("lease_generation").to_s)
+      return unless request
+
+      submit_failure(::DiscussionBridge::CmsReceiptCipher.decrypt(request))
+      raise Error.new("receiver_work_unavailable", status: 204)
+    end
+
+    def submit_failure(request)
+      receiver("V4-17") { @work.fail(authority.fetch("work_id"), request) }
+    end
+
+    def failure_code(error)
+      case error.code
+      when "native_ownership_conflict", "native_restore_required", "public_verification_failed",
+           "content_hash_mismatch", "source_ineligible"
+        error.code
+      when "ghost_prior_publication_unresolved"
+        "native_restore_required"
+      when "ghost_response_invalid", "ghost_response_too_large"
+        "public_verification_failed"
+      when "ghost_transport_failed"
+        "transport_timeout"
+      when "ghost_http_error"
+        if error.status == 429
+          "rate_limited"
+        elsif error.status && error.status >= 500
+          "native_service_unavailable"
+        else
+          "native_ownership_conflict"
+        end
+      end
     end
 
     def ownership_receipt
-      baseline = @state["verified"]
+      baseline = native_baseline
       source_url = withdrawing? ? baseline.fetch("source_url") : @source.fetch("topic_url")
       receipt = {
         "schema_version" => "db-native-ownership-1",
@@ -405,6 +685,15 @@ module DiscussionBridgeGhost
     end
 
     def native_result(operation, receipt)
+      result = receipt.slice("native_id", "external_id", "canonical_url").merge(
+        "kind" => @action, "native_revision" => operation.fetch("native_revision"),
+        "ownership_receipt_sha256" => receipt_sha256(receipt),
+      )
+      result["representation"] = representation unless withdrawing?
+      result
+    end
+
+    def receipt_sha256(receipt)
       hash = Digest::SHA256.new
       receipt.each_value do |value|
         if value.nil?
@@ -414,12 +703,7 @@ module DiscussionBridgeGhost
           hash.update([bytes.bytesize].pack("N")).update(bytes)
         end
       end
-      result = receipt.slice("native_id", "external_id", "canonical_url").merge(
-        "kind" => @action, "native_revision" => operation.fetch("native_revision"),
-        "ownership_receipt_sha256" => hash.hexdigest,
-      )
-      result["representation"] = representation unless withdrawing?
-      result
+      hash.hexdigest
     end
 
     def representation
