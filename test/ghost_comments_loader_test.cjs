@@ -29,7 +29,7 @@ function runLoader(fetch, mode = null, { managed = true, inArticle = false } = {
     querySelector: (selector) => selector === "main article, article" ? article : null,
     querySelectorAll: () => managed ? [block] : [],
     createElement: (tag) => ({
-      tag, children: [],
+      tag, children: [], style: {},
       append(...children) { this.children.push(...children); },
       replaceChildren(...children) { this.children = children; },
       setAttribute(name, value) { this[name] = value; },
@@ -69,10 +69,14 @@ test("refreshes the existing block from live replies alone", async () => {
   await new Promise(setImmediate);
   assert.equal(block["data-discussion-bridge-ghost-comments"], "loaded");
   assert.deepEqual(block.children[1].children.map((reply) => reply.textContent), ["currently visible reply"]);
-  assert.equal(block.children[2].href, "https://forum.example/t/source/54");
-  assert.equal(block.children[3].children[0], "Connected by ");
-  assert.equal(block.children[3].children[1].href, "https://discussionbridge.dev/");
-  assert.equal(block.children[3].children[1].textContent, "DiscussionBridge");
+  const [header, , credit] = block.children;
+  assert.equal(header.children[0].textContent, "Comments");
+  assert.equal(header.children[1].href, "https://forum.example/t/source/54");
+  assert.equal(header.children[1].textContent, "Open discussion");
+  assert.equal(credit.tag, "footer");
+  assert.equal(credit.children[0], "Connected by ");
+  assert.equal(credit.children[1].href, "https://discussionbridge.dev/");
+  assert.equal(credit.children[1].textContent, "DiscussionBridge");
 });
 
 test("an article that opts into Interactive embeds the authorized topic in the native full app", async () => {
@@ -86,7 +90,8 @@ test("an article that opts into Interactive embeds the authorized topic in the n
   await new Promise(setImmediate);
   assert.equal(block.children[1].tag, "iframe");
   assert.equal(block.children[1].src, "https://forum.example/embed/comments?topic_id=54&full_app=true");
-  assert.equal(block.children[2].href, "https://forum.example/t/source/54");
+  assert.equal(block.children[0].children[1].href, "https://forum.example/t/source/54");
+  assert.equal(block.children[2].tag, "footer");
 });
 
 test("an Interactive article without a verified discussion never mounts a frame", async () => {

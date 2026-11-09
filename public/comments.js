@@ -46,21 +46,45 @@
           article.append(target);
         }
       }
+      const header = document.createElement("div");
+      header.className = "discussionbridge-discussion__header";
+      Object.assign(header.style, {
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "baseline",
+        justifyContent: "space-between",
+        gap: "0.5em 1em",
+        marginBlockEnd: "1em",
+      });
       const heading = document.createElement("h2");
       heading.textContent = comments.title;
+      heading.style.margin = "0";
       const link = document.createElement("a");
       link.href = topic.href;
       link.textContent = comments.discussion;
+      link.style.fontSize = "0.875em";
+      header.append(heading, link);
       const content = interactive && Number.isSafeInteger(comments.topic_id) && comments.topic_id > 0
         ? discussionFrame(comments)
         : replyList(comments);
-      const credit = document.createElement("p");
+      const credit = document.createElement("footer");
       credit.className = "discussionbridge-credit";
+      credit.setAttribute("aria-label", "DiscussionBridge credit");
+      Object.assign(credit.style, {
+        marginBlockStart: "0.5em",
+        textAlign: "center",
+        fontSize: "0.875em",
+        lineHeight: "1.4",
+        opacity: "0.8",
+      });
       const brand = document.createElement("a");
+      brand.className = "discussionbridge-credit__brand";
       brand.href = "https://discussionbridge.dev/";
       brand.textContent = "DiscussionBridge";
+      brand.style.color = "inherit";
+      brand.style.fontWeight = "600";
       credit.append("Connected by ", brand);
-      target.replaceChildren(heading, content, link, credit);
+      target.replaceChildren(header, content, credit);
       target.setAttribute("data-discussion-bridge-ghost-comments", "loaded");
     } catch {
       // The saved discussion link remains available while live replies are unavailable.
