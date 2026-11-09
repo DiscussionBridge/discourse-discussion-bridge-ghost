@@ -1,0 +1,30 @@
+en:
+  js:
+    admin:
+      site_settings:
+        categories:
+          discourse_discussion_bridge_ghost: "DiscussionBridge Ghost"
+    discussion_bridge_ghost:
+      admin:
+        title: "DiscussionBridge Ghost"
+        setup: "Setup"
+        setup_description: "Configure automatic publishing between Discourse and Ghost."
+        settings: "Settings"
+        settings_description: "Set how often automatic Ghost sync runs."
+        intro: "Choose an enabled Ghost Content Connection and configure each publishing direction separately. Use the keys from a Ghost custom integration."
+        connections: "Manage DiscussionBridge Content Connections"
+        empty: "Create or enable a Ghost Content Connection and configure it for R7 to get started."
+        outbound: "Discourse to Ghost"
+        inbound: "Ghost to Discourse"
+        enabled: "Enable automatic publishing"
+        api_url: "Ghost API base URL"
+        admin_key: "Ghost Admin API key"
+        content_key: "Ghost Content API key"
+        keep_key: "Leave this field blank to keep the saved key."
+        kind: "Publish new articles as"
+        post: "Posts"
+        page: "Pages"
+        url_label: "URL label (optional)"
+        tag: "Ghost tag slug"
+        save: "Save"
+        saved: "Saved"

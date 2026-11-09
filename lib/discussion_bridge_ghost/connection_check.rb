@@ -6,14 +6,17 @@ module DiscussionBridgeGhost
     SCHEMA_SHA256 = "e6a15a6d70f7bc8b8ee82aa22a0b9c2ff1bbf2da6277f7087118be9e026ce5c0"
     Error = DiscussionBridgeGhost::Error
 
-    def self.receiver(connection_id)
+    def self.require_receiver!
       unless defined?(::DiscussionBridge::CmsProtocol::CONTRACT_SHA256) &&
              defined?(::DiscussionBridge::CmsProtocol::SCHEMA_SHA256) &&
              DiscussionBridge::CmsProtocol::CONTRACT_SHA256 == CONTRACT_SHA256 &&
              DiscussionBridge::CmsProtocol::SCHEMA_SHA256 == SCHEMA_SHA256
         raise Error.new("r7_receiver_required")
       end
+    end
 
+    def self.receiver(connection_id)
+      require_receiver!
       describe(connection_id)
     end
 

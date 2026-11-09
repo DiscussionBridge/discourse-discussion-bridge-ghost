@@ -11,7 +11,19 @@ require_relative "lib/discussion_bridge_ghost/post_presentation"
 require_relative "lib/discussion_bridge_ghost/publication"
 require_relative "lib/discussion_bridge_ghost/automatic_publishing"
 require_relative "lib/discussion_bridge_ghost/inbound_publishing"
+require_relative "lib/discussion_bridge_ghost/admin_setup"
+
+add_admin_route("discussion_bridge_ghost.admin.title", "discourse-discussion-bridge-ghost", use_new_show_route: true)
+Rails.application.config.filter_parameters << :ghost_credential
 
 after_initialize do
   require_relative "jobs/scheduled/discussion_bridge_ghost_publish"
+  require_relative "app/controllers/discussion_bridge_ghost/admin_connections_controller"
+
+  Discourse::Application.routes.append do
+    get "/discussion-bridge-ghost/admin/connections" => "discussion_bridge_ghost/admin_connections#index"
+    put "/discussion-bridge-ghost/admin/connections/:id/:direction" => "discussion_bridge_ghost/admin_connections#update"
+    get "/admin/plugins/discourse-discussion-bridge-ghost" => "admin/plugins#index", constraints: StaffConstraint.new
+    get "/admin/plugins/discourse-discussion-bridge-ghost/*path" => "admin/plugins#index", constraints: StaffConstraint.new
+  end
 end

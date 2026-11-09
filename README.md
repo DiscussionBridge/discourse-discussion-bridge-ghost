@@ -45,38 +45,12 @@ Make the topic eligible again and rerun the command to restore it. The connector
 
 ## Automatic publishing
 
-Enable Discourse-to-Ghost publishing for a specific Ghost Content Connection from the Rails console. The R7 From Discourse policy controls which topics it can publish. It uses the same Simple presentation and default root URL requirements as the manual command.
+Open **Admin → Plugins → DiscussionBridge Ghost → Setup**. Use an enabled Ghost Content Connection configured for R7 in **DiscussionBridge → Connections**. The setup page shows the directions allowed by that connection.
 
-```ruby
-require "io/console"
-DiscussionBridgeGhost::AutomaticPublishing.enable!(
-  connection_id: "connection-public-id",
-  admin_url: "https://admin.example.com",
-  admin_key: $stdin.noecho(&:gets).chomp,
-)
-```
+- **Discourse to Ghost.** Enable the direction, enter the Ghost API base URL and Admin API key, and choose posts or pages for new publications. You can add an optional URL label. The connection's R7 From Discourse policy controls the eligible topics. The connector uses Simple presentation and Ghost's default root routing.
+- **Ghost to Discourse.** Enable the direction, enter the Ghost API base URL and Content API key, and choose the Ghost tag slug to import. The connection needs a usable author and destination category. Tagged public posts and pages create unlisted topics under the connection's R7 rules. Edits update the original topic. Full article imports must fit the R7 source and request limits. [Ghost Content API](https://docs.ghost.org/content-api)
 
-The job reads R7's eligible source intents and pending mappings in batches. It defaults to posts for new publications. Set `kind: "page"` to create pages instead. Existing publications retain their type, native ID, and public URL. Supply a new key by running `enable!` again. The key is stored encrypted on Discourse.
-
-To stop scheduling this connection, call `DiscussionBridgeGhost::AutomaticPublishing.disable!(connection_id: "connection-public-id")`.
-
-### Ghost to Discourse
-
-Use a Ghost Content Connection that allows the To Discourse direction and has a usable author and destination category. Use the Content API key and API URL from a Ghost Custom Integration, and choose a public Ghost tag for articles you want to import.
-
-```ruby
-require "io/console"
-DiscussionBridgeGhost::InboundPublishing.enable!(
-  connection_id: "connection-public-id",
-  admin_url: "https://admin.example.com",
-  content_key: $stdin.noecho(&:gets).chomp,
-  tag: "discussionbridge",
-)
-```
-
-Publish a public Ghost post or page with that tag. The scheduler reads it through Ghost's Content API and creates an unlisted Discourse topic under the connection's R7 lane and authorship rules. Subsequent edits use the same Ghost ID and update the original topic. Full article imports must fit the R7 source and request limits. [Ghost Content API](https://docs.ghost.org/content-api)
-
-Call `DiscussionBridgeGhost::InboundPublishing.disable!(connection_id: "connection-public-id")` to stop the imports.
+Save each direction separately. Leave the key field blank to retain the saved key at the same API URL. Enter a new key to replace it or change the API URL. Discourse stores keys encrypted. To disable a direction, clear its checkbox and save.
 
 ### Sync interval
 

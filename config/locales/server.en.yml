@@ -1,3 +1,18 @@
 en:
   site_settings:
     discussion_bridge_ghost_sync_interval_minutes: "Minutes between automatic DiscussionBridge Ghost sync runs."
+  discussion_bridge_ghost:
+    setup_errors:
+      save_failed: "Ghost setup could not be saved (%{code})."
+      r7_receiver_required: "Ghost setup requires the DiscussionBridge R7 receiver."
+      receiver_connection_missing: "Select an enabled Ghost Content Connection with an R7 configuration."
+      ghost_setup_input_invalid: "Check the values in the Ghost setup form."
+      ghost_setup_direction_unavailable: "Allow this direction in the DiscussionBridge Content Connection first."
+      ghost_setup_credential_required: "Enter a Ghost key when setting up this direction or changing its API URL."
+      ghost_url_invalid: "Enter a valid HTTPS Ghost API base URL."
+      ghost_admin_key_invalid: "Enter the Admin API key from the Ghost custom integration."
+      ghost_content_key_invalid: "Enter the Content API key from the Ghost custom integration."
+      ghost_source_tag_invalid: "Enter a Ghost tag slug using lowercase letters, numbers, and hyphens."
+      ghost_simple_publish_policy_required: "Enable From Discourse publishing with the supported Simple policy in DiscussionBridge Connections."
+      ghost_http_error: "Ghost rejected the API request. Check the API URL and integration key."
+      ghost_transport_failed: "Discourse could not reach the Ghost API over HTTPS."
