@@ -20,6 +20,7 @@ module DiscussionBridgeGhost
   class GhostSite
     API_VERSION = "v6.0"
     MAX_BYTES = 8 * 1024 * 1024
+    COLLECTIONS = { "post" => "posts", "page" => "pages" }.freeze
 
     def initialize(admin_url, admin_key)
       @admin = https_url(admin_url)
@@ -47,29 +48,32 @@ module DiscussionBridgeGhost
       end
     end
 
-    def post_by_slug(slug)
-      lookup("posts/slug/#{slug}/?formats=html")
+    def article_by_slug(kind, slug)
+      collection = COLLECTIONS.fetch(kind)
+      object(admin_request(Net::HTTP::Get, "#{collection}/slug/#{slug}/?formats=html"), collection)
+    rescue Error => error
+      raise unless error.status == 404
+      nil
     end
 
-    def page_at_slug?(slug)
-      !lookup("pages/slug/#{slug}/?fields=id", collection: "pages").nil?
+    def article(kind, id)
+      collection = COLLECTIONS.fetch(kind)
+      object(admin_request(Net::HTTP::Get, "#{collection}/#{native_id!(id)}/?formats=html"), collection)
     end
 
-    def post(id)
-      raise Error.new("native_ownership_conflict") unless id.match?(/\A[0-9a-f]{24}\z/)
-      object(admin_request(Net::HTTP::Get, "posts/#{id}/?formats=html"), "posts")
-    end
-
-    def create_draft(slug:, title:, marker:)
+    def create_draft(kind, slug:, title:, marker:)
+      collection = COLLECTIONS.fetch(kind)
       fields = { slug: slug, title: title, status: "draft", lexical: lexical(marker) }
-      object(admin_request(Net::HTTP::Post, "posts/?formats=html", body: { posts: [fields] }, statuses: [201]), "posts")
+      response = admin_request(Net::HTTP::Post, "#{collection}/?formats=html", body: { collection => [fields] }, statuses: [201])
+      object(response, collection)
     end
 
-    def publish(post, title:, html:)
-      id = post.fetch("id")
-      raise Error.new("native_ownership_conflict") unless id.match?(/\A[0-9a-f]{24}\z/)
-      fields = { title: title, lexical: lexical(html), status: "published", updated_at: post.fetch("updated_at") }
-      object(admin_request(Net::HTTP::Put, "posts/#{id}/?formats=html", body: { posts: [fields] }), "posts")
+    def publish(kind, article, title:, html:)
+      update(kind, article, title: title, lexical: lexical(html), status: "published")
+    end
+
+    def withdraw(kind, article)
+      update(kind, article, status: "draft")
     end
 
     def public_article(url)
@@ -78,11 +82,16 @@ module DiscussionBridgeGhost
 
     private
 
-    def lookup(path, collection: "posts")
-      object(admin_request(Net::HTTP::Get, path), collection)
-    rescue Error => error
-      raise unless error.status == 404
-      nil
+    def update(kind, article, **fields)
+      collection = COLLECTIONS.fetch(kind)
+      id = native_id!(article.fetch("id"))
+      fields[:updated_at] = article.fetch("updated_at")
+      object(admin_request(Net::HTTP::Put, "#{collection}/#{id}/?formats=html", body: { collection => [fields] }), collection)
+    end
+
+    def native_id!(id)
+      raise Error.new("native_ownership_conflict") unless id.match?(/\A[0-9a-f]{24}\z/)
+      id
     end
 
     def object(body, collection)

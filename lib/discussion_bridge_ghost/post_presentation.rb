@@ -6,8 +6,6 @@ require "nokogiri"
 
 module DiscussionBridgeGhost
   class PostPresentation
-    PROFILE = "ghost-r7-post-html-card-1"
-
     def self.render(source, article, owner:, resource:, native_id:)
       topic = Topic.find(source.fetch("topic_id"))
       guardian = Guardian.new
