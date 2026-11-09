@@ -66,7 +66,7 @@ In Discourse Admin Site Settings, search for `discussion_bridge_ghost_sync_inter
 
 ## Public Ghost comments
 
-Add the following script to the Ghost post or page where you want a discussion. Paste it into an HTML card or the article's own Code injection header. Replace the example URL with the HTTPS URL of the Discourse site running this connector. The discussion renders within the article.
+For automatic placement, add the following script inside the article in the Ghost theme's post and page templates or in their shared article partial. For a single article, paste it into an HTML card or its Code injection header. Replace the example URL with the HTTPS URL of the Discourse site running this connector. Only articles with a verified R7 discussion display comments.
 
 ```html
 <script defer src="https://discourse.example.com/discussion-bridge-ghost/comments.js"></script>
