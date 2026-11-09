@@ -129,6 +129,20 @@ module DiscussionBridgeGhost
       object(admin_request(Net::HTTP::Get, "#{collection}/#{id}/?formats=html"), collection, id: id)
     end
 
+    def published_article_url(kind, id)
+      collection = COLLECTIONS.fetch(kind)
+      id = native_id!(id)
+      response = admin_request(Net::HTTP::Get, "#{collection}/#{id}/?fields=id,status,visibility,url", revalidate: true)
+      article = article_object(response, collection, id: id)
+      return unless article["status"] == "published" && article["visibility"] == "public"
+
+      https_url(article["url"])
+      article["url"]
+    rescue Error => error
+      raise unless [404, 410].include?(error.status)
+      nil
+    end
+
     def public_entries(kind, tag:, limit:, after_id: nil)
       filter = public_filter(tag)
       filter += "+id:>'#{native_id!(after_id)}'" if after_id
@@ -221,14 +235,21 @@ module DiscussionBridgeGhost
       raise Error.new("ghost_response_invalid"), cause: nil
     end
 
-    def object(body, collection, id: nil)
+    def article_object(body, collection, id: nil)
       entries = body[collection] if body.is_a?(Hash)
       unless entries.is_a?(Array) && entries.size == 1 && entries.first.is_a?(Hash)
         raise Error.new("ghost_response_invalid")
       end
       article = entries.first
-      unless valid_native_id?(article["id"]) && (!id || article["id"] == id) &&
-             %w[slug status url title html].all? { |field| text_field?(article[field]) }
+      unless valid_native_id?(article["id"]) && (!id || article["id"] == id)
+        raise Error.new("ghost_response_invalid")
+      end
+      article
+    end
+
+    def object(body, collection, id: nil)
+      article = article_object(body, collection, id: id)
+      unless %w[slug status url title html].all? { |field| text_field?(article[field]) }
         raise Error.new("ghost_response_invalid")
       end
       timestamp!(article["updated_at"])
@@ -242,12 +263,13 @@ module DiscussionBridgeGhost
       })
     end
 
-    def admin_request(method, path, authenticate: true, body: nil, statuses: [200])
+    def admin_request(method, path, authenticate: true, body: nil, statuses: [200], revalidate: false)
       uri = @admin.dup
       resource, query = path.split("?", 2)
       uri.path = "#{uri.path.delete_suffix('/')}/ghost/api/admin/#{resource}"
       uri.query = query
       headers = { "Accept" => "application/json", "Accept-Version" => API_VERSION }
+      headers["Cache-Control"] = "no-cache" if revalidate
       headers["Authorization"] = "Ghost #{token}" if authenticate
       _, raw = request(method, uri, headers: headers, body: body, statuses: statuses)
       value = JSON.parse(raw)

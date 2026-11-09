@@ -5,7 +5,11 @@ require_relative "../lib/discussion_bridge_ghost/inbound_publishing"
 
 module DiscussionBridge
   module CmsReceiptCipher
-    def self.decrypt(_encrypted)
+    def self.decrypt(encrypted)
+      if encrypted == "outbound-encrypted"
+        return { "admin_url" => "https://admin.ghost.example", "admin_key" => "synthetic-admin-key" }
+      end
+
       { "admin_url" => "https://ghost.example", "content_key" => "a" * 26, "tag" => "discussion" }
     end
   end
@@ -31,20 +35,50 @@ end
 module DiscussionBridgeGhost
   class GhostSite
     class << self
-      attr_accessor :entry, :last_query
+      attr_accessor :entry, :last_query, :published_url, :reads
+
+      def public_article(url)
+        reads << [:public_page, url]
+        [200, "matching owner fragment, which can also be copied"]
+      end
     end
 
-    def initialize(_url, content_key:); end
+    def initialize(url, admin_key = nil, content_key: nil)
+      if admin_key
+        raise "unexpected credential scope" unless url == "https://admin.ghost.example" && admin_key == "synthetic-admin-key"
+      end
+    end
 
     def public_entry(kind, id:, tag:)
       self.class.last_query = [kind, id, tag]
       self.class.entry
     end
+
+    def published_article_url(kind, id)
+      self.class.reads << [:native_identity, kind, id]
+      self.class.published_url
+    end
+  end
+
+  module AutomaticPublishing
+    SETTINGS = "outbound"
+  end
+
+  module PostPresentation
+    def self.current_page?(html, owner:, resource:, native_id:, revision:)
+      html == "matching owner fragment, which can also be copied"
+    end
   end
 end
 
 module PluginStore
-  def self.get(*) = "encrypted"
+  class << self
+    attr_accessor :outbound
+
+    def get(store, _connection_id)
+      store == "outbound" ? outbound : "encrypted"
+    end
+  end
 end
 
 class ApplicationController
@@ -61,6 +95,14 @@ class GhostCommentsIdentityTest < Minitest::Test
   CONNECTION = Data.define(:public_id).new("ghost")
   BINDING = Data.define(:external_id, :canonical_url, :content_connection)
     .new("ghost-post:#{ORIGINAL_ID}", URL, CONNECTION)
+  OUTBOUND = Data.define(:role, :content_connection).new("presentation", CONNECTION)
+  OWNED = { owner: "owner", resource: "resource", native_id: ORIGINAL_ID, revision: "revision", kind: "post" }.freeze
+
+  def setup
+    PluginStore.outbound = "outbound-encrypted"
+    DiscussionBridgeGhost::GhostSite.reads = []
+    DiscussionBridgeGhost::GhostSite.published_url = nil
+  end
 
   def entry(id: ORIGINAL_ID, url: URL, visibility: "public", tag: "discussion")
     { "id" => id, "url" => url, "visibility" => visibility, "access" => true, "tags" => [{ "slug" => tag }] }
@@ -89,5 +131,26 @@ class GhostCommentsIdentityTest < Minitest::Test
     topic = Object.new
     assert_nil controller.send(:outbound_identity, binding, nil, topic, policy)
     assert_equal [topic, policy], DiscussionBridge::CmsConfiguration.checked
+  end
+
+  def test_copied_outbound_fragment_requires_the_original_current_public_native_article
+    controller = DiscussionBridgeGhost::PublicCommentsController.new
+    link = DiscussionBridgeGhost::PublicCommentsController::PublicLink.new(OUTBOUND, Object.new, OWNED)
+    refute controller.send(:current_native_page?, link, URL), "old exact URL displays a copied fragment after the original disappeared"
+    assert_equal [[:public_page, URL], [:native_identity, "post", ORIGINAL_ID]], DiscussionBridgeGhost::GhostSite.reads
+
+    DiscussionBridgeGhost::GhostSite.published_url = "https://ghost.example/moved/"
+    refute controller.send(:current_native_page?, link, URL), "original exists at a different URL"
+
+    DiscussionBridgeGhost::GhostSite.published_url = URL
+    assert controller.send(:current_native_page?, link, URL), "original is verified independently of the matching HTML"
+  end
+
+  def test_manual_publication_without_a_saved_outbound_credential_refuses_live_replies
+    PluginStore.outbound = nil
+    controller = DiscussionBridgeGhost::PublicCommentsController.new
+    link = DiscussionBridgeGhost::PublicCommentsController::PublicLink.new(OUTBOUND, Object.new, OWNED)
+    refute controller.send(:current_native_page?, link, URL)
+    assert_empty DiscussionBridgeGhost::GhostSite.reads
   end
 end

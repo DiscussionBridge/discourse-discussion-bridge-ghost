@@ -28,10 +28,10 @@ module DiscussionBridgeGhost
       raise Error.new("ghost_default_root_routing_required") unless ["/", ""].include?(URI.parse(site_url).path)
     end
 
-    def self.call(kind:, connection_id:, topic_id:, admin_url:, admin_key:, url_label: nil, supervised: false)
+    def self.call(kind:, connection_id:, topic_id:, admin_url:, admin_key:, url_label: nil, supervised: false, withdraw_only: false)
       connection, descriptor = ConnectionCheck.receiver(connection_id)
       ghost = GhostSite.new(admin_url, admin_key)
-      new(connection, descriptor, ghost, topic_id, url_label, kind, supervised: supervised).call
+      new(connection, descriptor, ghost, topic_id, url_label, kind, supervised: supervised, withdraw_only: withdraw_only).call
     end
 
     def self.inspect_attention(kind:, connection_id:, topic_id:, admin_url:, admin_key:, inspection_id:, supervised: false)
@@ -40,7 +40,7 @@ module DiscussionBridgeGhost
       new(connection, descriptor, ghost, topic_id, nil, kind, supervised: supervised).inspect_attention(inspection_id)
     end
 
-    def initialize(connection, descriptor, ghost, topic_id, url_label, kind, supervised: false)
+    def initialize(connection, descriptor, ghost, topic_id, url_label, kind, supervised: false, withdraw_only: false)
       raise Error.new("ghost_kind_invalid") unless GhostSite::COLLECTIONS.key?(kind)
       @connection = connection
       @descriptor = descriptor
@@ -50,6 +50,7 @@ module DiscussionBridgeGhost
       @kind = kind
       @url_label = url_label
       @supervised = supervised
+      @withdraw_only = withdraw_only
       @key = "#{connection.public_id}:#{@topic_id}"
       @mapping_service = ::DiscussionBridge::CmsMappingService.new(connection)
       @work = ::DiscussionBridge::CmsWorkCoordinator.new(connection)
@@ -60,8 +61,8 @@ module DiscussionBridgeGhost
       Publication.validate_destination!(@connection, @descriptor, @ghost)
 
       with_lock do
-        check_supervised_scope!
         @state = PluginStore.get(STORE, @key)
+        check_supervised_scope!(allow_owned_withdrawal: @withdraw_only)
         if @state && @state.fetch("kind", "post") != @kind
           raise Error.new("native_ownership_conflict")
         end
@@ -70,6 +71,8 @@ module DiscussionBridgeGhost
         raise Error.new("receiver_#{refresh.error_code}") if refresh.error_code
 
         if intent&.state == "active"
+          raise Error.new("ghost_supervised_scope_denied") if @withdraw_only
+
           @action = "publish_revision"
           @source = intent.source_revisions.find_by!(source_revision: intent.current_source_revision).source_metadata
           @revision = @source.fetch("source_revision")
@@ -79,7 +82,11 @@ module DiscussionBridgeGhost
         else
           raise Error.new("receiver_source_ineligible")
         end
+        check_supervised_scope!
         @mapping = mapping
+        if @withdraw_only && @state.dig("supervised_publication", "resource_id") != @mapping["resource_id"]
+          raise Error.new("ghost_supervised_scope_denied")
+        end
         if withdrawing? && !@mapping["destination_native_id"]
           # R7 has no withdraw work for an unacknowledged native identity.
           # Keep the journal and the receiver's attention state for reconciliation.
@@ -119,13 +126,15 @@ module DiscussionBridgeGhost
       @action == "withdraw"
     end
 
-    def check_supervised_scope!
+    def check_supervised_scope!(allow_owned_withdrawal: @withdraw_only && withdrawing?)
       return unless @supervised
 
+      scope = SupervisedScope::CURRENT
       category_id = Topic.where(id: @topic_id).pick(:category_id)
-      unless SupervisedScope::CURRENT.outbound?(@connection.public_id, category_id)
-        raise Error.new("ghost_supervised_scope_denied")
-      end
+      return if scope.outbound?(@connection.public_id, category_id)
+      return if allow_owned_withdrawal && scope.owned_withdrawal?(@connection.public_id, @topic_id, @state)
+
+      raise Error.new("ghost_supervised_scope_denied")
     end
 
     def settled?
@@ -171,16 +180,7 @@ module DiscussionBridgeGhost
         item = receiver("V4-11") { @mapping_service.show(id).body }
       else
         raise Error.new("native_ownership_conflict") if withdrawing?
-        input = @state["reservation"] ||= {
-          "mutation_id" => SecureRandom.uuid, "source_id" => @source_id,
-          "source_revision" => @revision, "policy_revision" => @descriptor.fetch("policy").fetch("policy_revision"),
-          "external_id" => @state.fetch("external_id"), "canonical_url" => @state.fetch("url"),
-        }
-        save!
-        item = receiver("V4-09") { @mapping_service.prepare(input).body }
-        @state["mapping_id"] = item.fetch("mapping_id")
-        @state.delete("reservation")
-        save!
+        item = prepare_mapping
       end
 
       unless item.fetch("source_id") == @source_id && item.fetch("canonical_url") == @state.fetch("url") &&
@@ -188,7 +188,36 @@ module DiscussionBridgeGhost
              (!item["destination_native_id"] || item["destination_native_id"] == @state["native_id"])
         raise Error.new("native_ownership_conflict")
       end
+      unless id
+        @state["mapping_id"] = item.fetch("mapping_id")
+        @state.delete("reservation")
+        save!
+      end
       item
+    end
+
+    def prepare_mapping
+      policy_revision = @descriptor.fetch("policy").fetch("policy_revision")
+      if (previous = @state["reservation"])
+        begin
+          # R7 consults an accepted receipt before checking source and policy
+          # revisions. Replay the original input even when a newer intent exists.
+          return receiver("V4-09") { @mapping_service.prepare(previous).body }
+        rescue Error => error
+          stale_source = error.code == "V4-09 revision_conflict" && previous.fetch("source_revision") != @revision
+          stale_policy = error.code == "V4-09 policy_changed" && previous.fetch("policy_revision") != policy_revision
+          raise unless stale_source || stale_policy
+        end
+      end
+
+      input = {
+        "mutation_id" => SecureRandom.uuid, "source_id" => @source_id,
+        "source_revision" => @revision, "policy_revision" => policy_revision,
+        "external_id" => @state.fetch("external_id"), "canonical_url" => @state.fetch("url"),
+      }
+      @state["reservation"] = input
+      save!
+      receiver("V4-09") { @mapping_service.prepare(input).body }
     end
 
     def current_operation
@@ -300,6 +329,7 @@ module DiscussionBridgeGhost
       if (encrypted = operation["lease"])
         lease = ::DiscussionBridge::CmsReceiptCipher.decrypt(encrypted)
         if DiscussionBridgeCmsWork::LIVE_STATES.include?(@current_work.state) &&
+           lease.fetch("work").fetch("work_id") == @current_work.work_id &&
            @current_work.lease_generation == lease.fetch("lease_generation") &&
            Time.iso8601(lease.fetch("expires_at")) > Time.now
           return lease
@@ -342,7 +372,13 @@ module DiscussionBridgeGhost
         end
       else
         receiver("V4-13") do
-          @work.claim({ "mutation_id" => mutation_id, "mapping_id" => @mapping.fetch("mapping_id") })
+          # Constrain selection in the receiver transaction and bind the
+          # idempotency receipt to that same ordinary Work.
+          @work.claim(
+            { "mutation_id" => mutation_id, "mapping_id" => @mapping.fetch("mapping_id") },
+            expected_work_id: @current_work.work_id,
+            receipt_path: @current_work.work_id,
+          )
         end
       end
     end
@@ -463,11 +499,12 @@ module DiscussionBridgeGhost
       refresh_lease!
       operation["publish_started"] = true
       save!
-      if @mapping["destination_native_id"]
+      supervised_category = SupervisedScope::CURRENT.category("outbound") if @supervised
+      if @mapping["destination_native_id"] && !supervised_category
         apply_publication!(operation, article, expected)
       else
-        # For the first public write, serialize receiver invalidation and the
-        # normal source-row edits through synchronization of the native ID.
+        # Keep the source in scope while recording the supervised publication.
+        # For a first write, keep receiver invalidation fenced through synchronization.
         # NOWAIT keeps a concurrent edit from becoming a lock-order deadlock.
         @connection.with_lock do
           topic = Topic.lock("FOR UPDATE NOWAIT").find_by(id: @topic_id)
@@ -475,7 +512,7 @@ module DiscussionBridgeGhost
           raise Error.new("source_ineligible") unless topic && post
 
           refresh_lease!
-          apply_publication!(operation, article, expected)
+          apply_publication!(operation, article, expected, supervised_category: supervised_category)
           synchronize(operation)
         end
       end
@@ -483,13 +520,20 @@ module DiscussionBridgeGhost
       raise Error.new("ghost_publication_busy"), cause: nil
     end
 
-    def apply_publication!(operation, article, expected)
+    def apply_publication!(operation, article, expected, supervised_category: nil)
       operation["write_dispatched"] = true
       @ghost.publish(@kind, article, title: @source.fetch("title"), html: operation.fetch("html"))
       article = @ghost.article(@kind, article.fetch("id"))
       assert_owned!(article)
       raise Error.new("public_verification_failed") unless target_article?(article, expected)
 
+      if supervised_category
+        @state["supervised_publication"] = @state.slice("mapping_id", "native_id", "owner", "url", "external_id").merge(
+          "connection_id" => @connection.public_id, "topic_id" => @topic_id.to_i, "category_id" => supervised_category,
+          "resource_id" => @mapping.fetch("resource_id"), "digest" => expected, "revision" => @revision,
+          "native_revision" => article.fetch("updated_at"),
+        )
+      end
       remember_publication!(operation, article, expected)
     end
 
@@ -516,6 +560,9 @@ module DiscussionBridgeGhost
         end
       else
         assert_baseline!(article)
+        if @withdraw_only && article["updated_at"] != @state.dig("supervised_publication", "native_revision")
+          raise Error.new("native_ownership_conflict")
+        end
         refresh_lease!
         operation["withdraw_started"] = true
         save!

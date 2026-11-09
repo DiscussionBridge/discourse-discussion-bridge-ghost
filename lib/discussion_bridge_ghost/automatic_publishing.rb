@@ -58,10 +58,10 @@ module DiscussionBridgeGhost
       inspect_waiting(encrypted, options)
       cursor = PluginStore.get(PROGRESS, @connection_id).to_i
 
-      ready_batch(cursor).each do |intent_id, topic_id, mapping_id|
+      ready_batch(cursor).each do |intent_id, topic_id, mapping_id, intent_state|
         break unless PluginStore.get(SETTINGS, @connection_id) == encrypted
 
-        publish(topic_id, mapping_id, options)
+        publish(topic_id, mapping_id, intent_state, options)
         PluginStore.set(PROGRESS, @connection_id, intent_id)
       end
     rescue Error, ::DiscussionBridge::CmsProtocol::Error => error
@@ -110,9 +110,11 @@ module DiscussionBridgeGhost
     def ready_batch(cursor)
       scope = candidates
       if (category_id = SupervisedScope::CURRENT.category("outbound"))
-        scope = scope.where(topic_id: Topic.where(category_id: category_id).select(:id))
+        in_category = scope.where(topic_id: Topic.where(category_id: category_id).select(:id))
+        withdrawal = scope.where(state: "revoked").where("ghost_mapping.destination_native_id IS NOT NULL")
+        scope = in_category.or(withdrawal)
       end
-      columns = ["discussion_bridge_cms_source_intents.id", :topic_id, "ghost_mapping.mapping_id"]
+      columns = ["discussion_bridge_cms_source_intents.id", :topic_id, "ghost_mapping.mapping_id", :state]
       rows = scope.where("discussion_bridge_cms_source_intents.id > ?", cursor).limit(BATCH_SIZE).pluck(*columns)
       if rows.size < BATCH_SIZE && cursor.positive?
         rows += scope.where("discussion_bridge_cms_source_intents.id <= ?", cursor)
@@ -140,19 +142,22 @@ module DiscussionBridgeGhost
         .order(:id)
     end
 
-    def publish(topic_id, mapping_id, options)
-      if (category_id = SupervisedScope::CURRENT.category("outbound"))
-        return unless Topic.exists?(id: topic_id, category_id: category_id)
-      end
-
+    def publish(topic_id, mapping_id, intent_state, options)
       state = PluginStore.get(Publication::STORE, "#{@connection_id}:#{topic_id}")
       return if mapping_id && !state
+      scope = SupervisedScope::CURRENT
+      category_id = scope.category("outbound")
+      withdraw_only = category_id && !Topic.exists?(id: topic_id, category_id: category_id)
+      if withdraw_only
+        return unless intent_state == "revoked" && mapping_id && mapping_id == state["mapping_id"] &&
+          scope.owned_withdrawal?(@connection_id, topic_id, state)
+      end
 
       kind = state ? state.fetch("kind", "post") : options.fetch("kind")
       Publication.call(
         kind: kind, connection_id: @connection_id, topic_id: topic_id,
         admin_url: options.fetch("admin_url"), admin_key: options.fetch("admin_key"), url_label: options["url_label"],
-        supervised: true,
+        supervised: true, withdraw_only: !!withdraw_only,
       )
     rescue Error, ::DiscussionBridge::CmsProtocol::Error => error
       log(error, topic_id) unless %w[receiver_work_unavailable ghost_publication_busy].include?(error.code)

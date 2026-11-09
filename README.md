@@ -56,7 +56,9 @@ Open **Admin → Plugins → DiscussionBridge Ghost → Setup**. Use an enabled 
 
 Save each direction separately. Leave the key field blank to retain the saved key at the same API URL. Enter a new key to replace it or change the API URL. Discourse stores keys encrypted. To disable a direction, clear its checkbox and save.
 
-Set `DISCOURSE_DISCUSSION_BRIDGE_GHOST_SCOPE` in the Discourse service environment before starting the scheduler. An unset or invalid value pauses both directions, as does `paused`. For a supervised install, supply a JSON object with an `outbound` rule containing the approved connection's public `connection_id` and numeric `category_id`, or an `inbound` rule containing those fields and the approved Ghost `tag` slug. Include both rules to run both directions. Restart all scheduler processes after changing the scope. For normal operation outside supervision, set it to `unrestricted`. These controls preserve saved connection settings.
+Set `DISCOURSE_DISCUSSION_BRIDGE_GHOST_SCOPE` in the Discourse service environment before starting the scheduler. An unset or invalid value pauses both directions, as does `paused`. For a supervised install, supply a JSON object with an `outbound` rule containing the approved connection's public `connection_id` and numeric `category_id`, or an `inbound` rule containing those fields and the approved Ghost `tag` slug. R7 public connection IDs use `dbc_` followed by 24 lowercase hexadecimal digits. Include both rules to run both directions. Restart all scheduler processes after changing the scope. For normal operation outside supervision, set it to `unrestricted`. These controls preserve saved connection settings.
+
+Scope the receiver's outbound policy to the test category as well. If an approved source moves outside that policy, scheduled withdrawal can use current R7 work to remove the exact Ghost copy recorded under the same supervised scope.
 
 ### Sync interval
 
@@ -72,6 +74,6 @@ Add the following script to the Ghost site footer under **Settings → Code inje
 
 The loader uses the current Ghost article URL to find its R7 discussion and shows up to 50 guest-visible replies. It supports Ghost articles imported into Discourse and Simple articles published from Discourse. The reader can open the linked topic to join the discussion.
 
-Ghost keeps only the discussion link in new outbound publications. The loader verifies the current Ghost article and gets live replies from Discourse. An earlier connector may have stored replies in the Ghost HTML. If any of those articles are still served, have an authorized operator remove the old reply bodies from Ghost before relying on this loader for moderation.
+Ghost keeps only the discussion link in new outbound publications. The loader verifies the current Ghost article and gets live replies from Discourse. Outbound live replies require the connection's saved Ghost outbound credential to verify the public article by native ID. When that credential is unavailable, the article retains its discussion link. An earlier connector may have stored replies in the Ghost HTML. If any of those articles are still served, have an authorized operator remove the old reply bodies from Ghost before relying on this loader for moderation.
 
 To choose where the comments appear, put `<div data-discussion-bridge-ghost-comments></div>` in the Ghost theme or article. The loader otherwise uses the existing Simple comments section when present, or adds a section to the article.

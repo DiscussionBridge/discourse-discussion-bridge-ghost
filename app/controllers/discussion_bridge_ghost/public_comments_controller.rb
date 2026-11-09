@@ -109,19 +109,33 @@ module DiscussionBridgeGhost
         state["external_id"] == binding.external_id && state["url"] == binding.canonical_url &&
         state["native_id"] == mapping.destination_native_id && state["owner"].present?
 
+      kind = state.fetch("kind", "post")
+      return unless GhostSite::COLLECTIONS.key?(kind)
+
       {
         owner: state.fetch("owner"), resource: record.resource_id.to_s,
-        native_id: mapping.destination_native_id, revision: mapping.publicly_verified_source_revision,
+        native_id: mapping.destination_native_id, revision: mapping.publicly_verified_source_revision, kind: kind,
       }
     end
 
     def current_native_page?(link, canonical)
-      if link.binding.role == "source"
-        InboundPublishing.current_source?(link.binding)
-      else
-        status, html = GhostSite.public_article(canonical)
-        status == 200 && PostPresentation.current_page?(html, **link.identity)
-      end
+      return InboundPublishing.current_source?(link.binding) if link.binding.role == "source"
+
+      connection_id = link.binding.content_connection.public_id
+      encrypted = PluginStore.get(AutomaticPublishing::SETTINGS, connection_id)
+      return false unless encrypted
+
+      options = ::DiscussionBridge::CmsReceiptCipher.decrypt(encrypted)
+      return false unless options.is_a?(Hash)
+
+      ghost = GhostSite.new(options["admin_url"], options["admin_key"])
+      status, html = GhostSite.public_article(canonical)
+      return false unless status == 200 && PostPresentation.current_page?(html, **link.identity.except(:kind))
+
+      # A public HTML fragment can be copied. Confirm the native identity separately,
+      # after reading the page, using the connection's saved Ghost Admin credential.
+      ghost.published_article_url(link.identity.fetch(:kind), link.identity.fetch(:native_id)) == canonical &&
+        PluginStore.get(AutomaticPublishing::SETTINGS, connection_id) == encrypted
     end
   end
 end

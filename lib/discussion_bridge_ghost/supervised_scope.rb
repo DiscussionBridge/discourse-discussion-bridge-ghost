@@ -6,7 +6,7 @@ module DiscussionBridgeGhost
   class SupervisedScope
     ENV_KEY = "DISCOURSE_DISCUSSION_BRIDGE_GHOST_SCOPE"
     DIRECTIONS = %w[outbound inbound].freeze
-    CONNECTION_ID = /\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/
+    CONNECTION_ID = /\Adbc_[a-f0-9]{24}\z/
     TAG = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
 
     def initialize(value)
@@ -29,6 +29,19 @@ module DiscussionBridgeGhost
 
     def outbound?(connection_id, category_id)
       @unrestricted || connection?("outbound", connection_id) && category("outbound") == category_id
+    end
+
+    def owned_withdrawal?(connection_id, topic_id, state)
+      rule = @directions["outbound"]
+      proof = state&.fetch("supervised_publication", nil)
+      baseline = state&.fetch("native_baseline", nil)
+      rule && proof && baseline && connection?("outbound", connection_id) &&
+        proof["connection_id"] == connection_id && proof["topic_id"] == topic_id.to_i &&
+        proof["category_id"] == rule.fetch("category_id") && proof["resource_id"] &&
+        %w[mapping_id native_id owner url external_id].all? { |key| state[key] && proof[key] == state[key] } &&
+        proof["digest"] && proof["revision"] && proof["digest"] == baseline["digest"] &&
+        proof["revision"] == baseline["revision"] &&
+        (baseline["status"] == "draft" || proof["native_revision"] == baseline["native_revision"])
     end
 
     def inbound?(connection_id, category_id, tag)

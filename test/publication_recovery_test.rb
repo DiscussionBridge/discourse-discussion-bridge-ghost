@@ -58,6 +58,38 @@ class PublicationRecoveryTest < Minitest::Test
     assert_equal "native_ownership_conflict", error.code
   end
 
+  def test_moved_topic_withdrawal_requires_exact_native_revision_before_lease_renewal_and_write
+    article = owned_article
+    original = article.fetch("updated_at")
+    source_url = "https://discourse.example.test/t/1"
+    digest = @publisher.send(:fragment_digest, article.fetch("html"), source_url: source_url)
+    @publisher.send(:remember_native!, article, source_url: source_url, digest: digest, revision: "approved")
+    state = @publisher.instance_variable_get(:@state)
+    state["supervised_publication"] = { "native_revision" => original }
+    @publisher.instance_variable_set(:@withdraw_only, true)
+    @publisher.instance_variable_set(:@descriptor, { "destination_origin" => "https://ghost.example.test" })
+
+    calls = []
+    native = article.merge("updated_at" => "unrelated-native-change")
+    ghost = Object.new
+    ghost.define_singleton_method(:article) { |_kind, _id| native }
+    ghost.define_singleton_method(:withdraw) do |_kind, seen|
+      calls << [:withdraw, seen.fetch("id"), seen.fetch("updated_at")]
+      uuid = "01234567-1234-1234-1234-0123456789ab"
+      native = seen.merge("status" => "draft", "uuid" => uuid, "url" => "https://ghost.example.test/p/#{uuid}/")
+    end
+    @publisher.instance_variable_set(:@ghost, ghost)
+    @publisher.define_singleton_method(:refresh_lease!) { calls << :renew_withdrawal }
+
+    error = assert_raises(Error) { @publisher.send(:prepare_withdrawal, {}) }
+    assert_equal "native_ownership_conflict", error.code
+    assert_empty calls
+    native = article
+    @publisher.send(:prepare_withdrawal, {})
+    assert_equal [:renew_withdrawal, [:withdraw, article.fetch("id"), original]], calls
+    assert_equal "draft", state.fetch("native_baseline").fetch("status")
+  end
+
   def test_failure_code_distinguishes_permanent_public_proof_and_transient_native_errors
     cases = {
       ["public_verification_failed", 200] => "public_verification_failed",
@@ -115,7 +147,154 @@ class PublicationRecoveryTest < Minitest::Test
     assert_equal "unavailable", payload.dig("observation", "native_state")
   end
 
+  def test_definitive_stale_source_rejection_replaces_only_the_reservation_request
+    assert_replaces_stale_reservation("source_revision", "revision_conflict")
+  end
+
+  def test_definitive_stale_policy_rejection_replaces_only_the_reservation_request
+    assert_replaces_stale_reservation("policy_revision", "policy_changed")
+  end
+
+  def test_lost_success_replays_original_reservation_despite_a_newer_intent
+    state = reservation_context
+    persisted = {}
+    @publisher.define_singleton_method(:save!) { persisted.replace(Marshal.load(Marshal.dump(@state))) }
+    service = Object.new
+    accepted = {}
+    inputs = []
+    response = Struct.new(:body).new(mapping_result)
+    service.define_singleton_method(:prepare) do |input|
+      raise "request was not persisted before prepare" unless persisted.fetch("reservation") == input
+
+      inputs << input.dup
+      if accepted.empty?
+        accepted[input.fetch("mutation_id")] = input.dup
+        raise IOError, "response lost after receiver committed"
+      end
+
+      raise "a fresh prepare would lose the accepted receipt" unless accepted.fetch(input.fetch("mutation_id")) == input
+      response
+    end
+    @publisher.instance_variable_set(:@mapping_service, service)
+
+    uncertain = nil
+    with_receiver_protocol do
+      assert_raises(IOError) { @publisher.send(:mapping) }
+      state.replace(Marshal.load(Marshal.dump(persisted)))
+      uncertain = state.fetch("reservation").dup
+      @publisher.instance_variable_set(:@revision, "newer-source")
+      @publisher.instance_variable_set(:@descriptor, { "policy" => { "policy_revision" => "newer-policy" } })
+      assert_equal mapping_result, @publisher.send(:mapping)
+    end
+    assert_equal [uncertain, uncertain], inputs
+    assert_equal "mapping-1", state.fetch("mapping_id")
+    refute state.key?("reservation")
+  end
+
+  def test_exact_ordinary_claim_does_not_lease_an_intervening_replacement
+    work = Struct.new(:work_id, :retry_of_work_id)
+    result = Struct.new(:status)
+    selected = work.new("selected-work", nil)
+    replacement = work.new("replacement-work", nil)
+    @publisher.instance_variable_set(:@current_work, selected)
+    @publisher.instance_variable_set(:@mapping, { "mapping_id" => "mapping-1" })
+    calls = []
+    leased = []
+    coordinator = Object.new
+    coordinator.define_singleton_method(:claim) do |input, expected_work_id: nil, receipt_path: ""|
+      calls << [input, expected_work_id, receipt_path]
+      if expected_work_id.nil? || expected_work_id == replacement.work_id
+        leased << replacement.work_id
+        result.new(200)
+      else
+        result.new(204)
+      end
+    end
+    @publisher.instance_variable_set(:@work, coordinator)
+
+    assert_equal 204, @publisher.send(:claim_current_work, "old-attempt").status
+    assert_empty leased
+    assert_equal [
+      { "mutation_id" => "old-attempt", "mapping_id" => "mapping-1" }, "selected-work", "selected-work",
+    ], calls.fetch(0)
+
+    @publisher.instance_variable_set(:@current_work, replacement)
+    assert_equal 200, @publisher.send(:claim_current_work, "new-attempt").status
+    assert_equal ["replacement-work"], leased
+  end
+
   private
+
+  def assert_replaces_stale_reservation(field, code)
+    state = reservation_context
+    old = {
+      "mutation_id" => "prior-attempt", "source_id" => "topic:1",
+      "source_revision" => "source-now", "policy_revision" => "policy-now",
+      "external_id" => "ghost-post:stable-owner", "canonical_url" => URL,
+    }
+    old[field] = "superseded"
+    state["reservation"] = old
+    inputs = []
+    service = Object.new
+    response = Struct.new(:body).new(mapping_result)
+    service.define_singleton_method(:prepare) do |input|
+      raise "request was not persisted before prepare" unless state.fetch("reservation") == input
+
+      inputs << input.dup
+      raise ::DiscussionBridge::CmsProtocol::Error.new(code) if inputs.size == 1
+
+      response
+    end
+    @publisher.instance_variable_set(:@mapping_service, service)
+
+    with_receiver_protocol { assert_equal mapping_result, @publisher.send(:mapping) }
+    assert_equal old, inputs.fetch(0)
+    fresh = inputs.fetch(1)
+    refute_equal old.fetch("mutation_id"), fresh.fetch("mutation_id")
+    assert_equal "source-now", fresh.fetch("source_revision")
+    assert_equal "policy-now", fresh.fetch("policy_revision")
+    assert_equal old.slice("source_id", "external_id", "canonical_url"), fresh.slice("source_id", "external_id", "canonical_url")
+    assert_equal "stable-owner", state.fetch("owner")
+    assert_equal "article", state.fetch("slug")
+    assert_equal "mapping-1", state.fetch("mapping_id")
+    refute state.key?("reservation")
+  end
+
+  def with_receiver_protocol(&block)
+    protocol = Module.new
+    protocol.const_set(:ERRORS, {
+      "revision_conflict" => { "http" => 409 }, "policy_changed" => { "http" => 409 },
+    })
+    error_type = Class.new(StandardError) do
+      attr_reader :code
+
+      def initialize(code)
+        @code = code
+        super
+      end
+    end
+    protocol.const_set(:Error, error_type)
+    bridge = Module.new
+    bridge.const_set(:CmsProtocol, protocol)
+    with_constants(DiscussionBridge: bridge, &block)
+  end
+
+  def reservation_context
+    @publisher.instance_variable_set(:@source_id, "topic:1")
+    @publisher.instance_variable_set(:@action, "publish_revision")
+    @publisher.instance_variable_set(:@revision, "source-now")
+    @publisher.instance_variable_set(:@descriptor, { "policy" => { "policy_revision" => "policy-now" } })
+    state = { "owner" => "stable-owner", "slug" => "article", "external_id" => "ghost-post:stable-owner", "url" => URL }
+    @publisher.instance_variable_set(:@state, state)
+    state
+  end
+
+  def mapping_result
+    {
+      "mapping_id" => "mapping-1", "source_id" => "topic:1", "canonical_url" => URL,
+      "external_id" => "ghost-post:stable-owner", "presentation_mode" => "simple", "destination_native_id" => nil,
+    }
+  end
 
   def stub_article(article)
     test = self

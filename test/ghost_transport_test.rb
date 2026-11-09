@@ -83,6 +83,30 @@ class GhostTransportTest < Minitest::Test
     assert_equal 1, requests.size
   end
 
+  def test_admin_native_lookup_uses_the_exact_kind_id_and_current_publication_fields
+    public_article = { "id" => ID, "status" => "published", "visibility" => "public", "url" => URL }
+    respond_with("pages" => [public_article])
+    assert_equal URL, @ghost.published_article_url("page", ID)
+    method, uri, options = @requests.fetch(0)
+    assert_equal Net::HTTP::Get, method
+    assert_match %r{/ghost/api/admin/pages/#{ID}/\z}, uri.path
+    assert_equal "id,status,visibility,url", URI.decode_www_form(uri.query).to_h.fetch("fields")
+    assert_match(/\AGhost /, options.fetch(:headers).fetch("Authorization"))
+    assert_equal "no-cache", options.fetch(:headers).fetch("Cache-Control")
+
+    respond_with("pages" => [public_article.merge("status" => "draft")])
+    assert_nil @ghost.published_article_url("page", ID)
+    respond_with("pages" => [public_article.merge("visibility" => "members")])
+    assert_nil @ghost.published_article_url("page", ID)
+    respond_with("pages" => [public_article.merge("id" => OTHER_ID)])
+    assert_invalid_response { @ghost.published_article_url("page", ID) }
+
+    @ghost.define_singleton_method(:request) do |*, **|
+      raise DiscussionBridgeGhost::Error.new("ghost_http_error", status: 404)
+    end
+    assert_nil @ghost.published_article_url("page", ID)
+  end
+
   private
 
   def stub_transport(ghost)
