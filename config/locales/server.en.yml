@@ -1,0 +1,3 @@
+en:
+  site_settings:
+    discussion_bridge_ghost_sync_interval_minutes: "Minutes between automatic DiscussionBridge Ghost sync runs."

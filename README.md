@@ -45,7 +45,7 @@ Make the topic eligible again and rerun the command to restore it. The connector
 
 ## Automatic publishing
 
-Enable the one-minute Discourse job for a specific Ghost Content Connection from the Rails console. The R7 From Discourse policy controls which topics it can publish. It uses the same Simple presentation and default root URL requirements as the manual command.
+Enable Discourse-to-Ghost publishing for a specific Ghost Content Connection from the Rails console. The R7 From Discourse policy controls which topics it can publish. It uses the same Simple presentation and default root URL requirements as the manual command.
 
 ```ruby
 require "io/console"
@@ -60,4 +60,24 @@ The job reads R7's eligible source intents and pending mappings in batches. It d
 
 To stop scheduling this connection, call `DiscussionBridgeGhost::AutomaticPublishing.disable!(connection_id: "connection-public-id")`.
 
-Ghost-to-Discourse publishing and operator UI are later increments.
+### Ghost to Discourse
+
+Use a Ghost Content Connection that allows the To Discourse direction and has a usable author and destination category. Use the Content API key and API URL from a Ghost Custom Integration, and choose a public Ghost tag for articles you want to import.
+
+```ruby
+require "io/console"
+DiscussionBridgeGhost::InboundPublishing.enable!(
+  connection_id: "connection-public-id",
+  admin_url: "https://admin.example.com",
+  content_key: $stdin.noecho(&:gets).chomp,
+  tag: "discussionbridge",
+)
+```
+
+Publish a public Ghost post or page with that tag. The scheduler reads it through Ghost's Content API and creates an unlisted Discourse topic under the connection's R7 lane and authorship rules. Subsequent edits use the same Ghost ID and update the original topic. Full article imports must fit the R7 source and request limits. [Ghost Content API](https://docs.ghost.org/content-api)
+
+Call `DiscussionBridgeGhost::InboundPublishing.disable!(connection_id: "connection-public-id")` to stop the imports.
+
+### Sync interval
+
+In Discourse Admin Site Settings, search for `discussion_bridge_ghost_sync_interval_minutes`. The setting applies to both automatic directions and defaults to 5 minutes. Set it to a value from 1 to 60 minutes. Discourse checks whether a sync is due every minute and uses the new value when the current interval expires.

@@ -22,8 +22,13 @@ module DiscussionBridgeGhost
     MAX_BYTES = 8 * 1024 * 1024
     COLLECTIONS = { "post" => "posts", "page" => "pages" }.freeze
 
-    def initialize(admin_url, admin_key)
+    def initialize(admin_url, admin_key = nil, content_key: nil)
       @admin = https_url(admin_url)
+      if content_key
+        raise Error.new("ghost_content_key_invalid") unless /\A[0-9a-f]{26}\z/i.match?(content_key)
+        @content_key = content_key
+        return
+      end
       key = /\A([0-9a-f]{24}):([0-9a-f]{64})\z/i.match(admin_key)
       raise Error.new("ghost_admin_key_invalid") unless key
       @key_id = key[1]
@@ -61,6 +66,31 @@ module DiscussionBridgeGhost
       object(admin_request(Net::HTTP::Get, "#{collection}/#{native_id!(id)}/?formats=html"), collection)
     end
 
+    def public_entries(kind, tag:, limit:, after_id: nil)
+      collection = COLLECTIONS.fetch(kind)
+      filter = "visibility:public+tag:#{tag}"
+      filter += "+id:>'#{native_id!(after_id)}'" if after_id
+      uri = @admin.dup
+      uri.path = "#{uri.path.delete_suffix('/')}/ghost/api/content/#{collection}/"
+      uri.query = URI.encode_www_form(
+        key: @content_key, filter: filter, limit: limit, order: "id asc", include: "tags,authors", formats: "html",
+      )
+      headers = { "Accept" => "application/json", "Accept-Version" => API_VERSION }
+      _, raw = request(Net::HTTP::Get, uri, headers: headers, statuses: [200])
+      body = JSON.parse(raw)
+      entries = body[collection] if body.is_a?(Hash)
+      unless entries.is_a?(Array) && entries.size <= limit && entries.all? { |entry| entry.is_a?(Hash) }
+        raise Error.new("ghost_response_invalid")
+      end
+      ids = entries.map { |entry| native_id!(entry["id"]) }
+      unless ids == ids.sort.uniq && (!after_id || ids.empty? || ids.first > after_id)
+        raise Error.new("ghost_response_invalid")
+      end
+      entries
+    rescue JSON::ParserError, EncodingError
+      raise Error.new("ghost_response_invalid"), cause: nil
+    end
+
     def create_draft(kind, slug:, title:, marker:)
       collection = COLLECTIONS.fetch(kind)
       fields = { slug: slug, title: title, status: "draft", lexical: lexical(marker) }
@@ -90,7 +120,7 @@ module DiscussionBridgeGhost
     end
 
     def native_id!(id)
-      raise Error.new("native_ownership_conflict") unless id.match?(/\A[0-9a-f]{24}\z/)
+      raise Error.new("native_ownership_conflict") unless id.is_a?(String) && id.match?(/\A[0-9a-f]{24}\z/)
       id
     end
 
