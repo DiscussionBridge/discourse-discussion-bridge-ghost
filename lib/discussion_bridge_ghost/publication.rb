@@ -296,6 +296,7 @@ module DiscussionBridgeGhost
           expected = fragment_digest(operation.fetch("html"), source_url: source_url)
           if article["status"] == "published" && article["url"] == @state.fetch("url") &&
              article["title"] == title && matching_fragment?(article.fetch("html"), expected, source_url)
+            remember_reconciled_dispatch!(operation, work, article, expected)
             remember_native!(article, source_url: source_url, digest: expected, revision: operation.fetch("revision"))
             return
           end
@@ -522,14 +523,14 @@ module DiscussionBridgeGhost
       end
     end
 
-    def with_publication_fence
+    def with_publication_fence(allow_missing_source: false)
       # NOWAIT keeps a concurrent edit from becoming a lock-order deadlock.
       @connection.with_lock do
-        topic = Topic.lock("FOR UPDATE NOWAIT").find_by(id: @topic_id)
-        post = Post.lock("FOR UPDATE NOWAIT").find_by(topic_id: @topic_id, post_number: 1)
-        raise Error.new("source_ineligible") unless topic && post
+        topic = Topic.unscoped.lock("FOR UPDATE NOWAIT").find_by(id: @topic_id)
+        post = Post.unscoped.lock("FOR UPDATE NOWAIT").find_by(topic_id: @topic_id, post_number: 1) if topic
+        raise Error.new("source_ineligible") unless allow_missing_source || (topic && post)
 
-        yield
+        yield(topic)
       end
     rescue ActiveRecord::LockWaitTimeout
       raise Error.new("ghost_publication_busy"), cause: nil
@@ -562,6 +563,22 @@ module DiscussionBridgeGhost
       end
     end
 
+    def remember_reconciled_dispatch!(operation, work, article, digest)
+      recorded = work&.action == "publish_revision" && work.source_revision == operation.fetch("revision")
+      if (scope = scoped_dispatch_identity)
+        if recorded && operation["supervised_dispatch"] == scope
+          remember_scoped_publication!(article, digest, scope, revision: work.source_revision)
+        elsif @withdraw_only
+          raise Error.new("native_restore_required")
+        end
+      end
+      if recorded && !@mapping["destination_native_id"]
+        # Keep only the exact dispatch that produced the current native baseline.
+        @state["unrecorded_dispatch"] = operation.slice("publish_started", "revision", "source_url", "title")
+          .merge("work_id" => work.work_id, "digest" => digest)
+      end
+    end
+
     def apply_publication!(operation, article, expected, scope: nil)
       operation["write_dispatched"] = true
       @ghost.publish(@kind, article, title: @source.fetch("title"), html: operation.fetch("html"))
@@ -573,9 +590,9 @@ module DiscussionBridgeGhost
       remember_publication!(operation, article, expected)
     end
 
-    def remember_scoped_publication!(article, digest, scope)
+    def remember_scoped_publication!(article, digest, scope, revision: @revision)
       @state["supervised_publication"] = scope.merge(
-        "digest" => digest, "revision" => @revision, "native_revision" => article.fetch("updated_at"),
+        "digest" => digest, "revision" => revision, "native_revision" => article.fetch("updated_at"),
       )
     end
 
@@ -594,6 +611,20 @@ module DiscussionBridgeGhost
     end
 
     def prepare_withdrawal(operation)
+      return apply_withdrawal!(operation) unless @withdraw_only
+
+      with_publication_fence(allow_missing_source: true) do |topic|
+        configuration = receiver("V4-01") { ::DiscussionBridge::CmsConfiguration.current!(@connection) }
+        policy = configuration.fetch("policy")
+        if policy.fetch("enabled") && ::DiscussionBridge::CmsConfiguration.eligible?(topic, policy)
+          raise Error.new("ghost_supervised_scope_denied")
+        end
+        apply_withdrawal!(operation)
+        synchronize(operation)
+      end
+    end
+
+    def apply_withdrawal!(operation)
       article = @ghost.article(@kind, @state.fetch("native_id"))
       assert_owned!(article)
       if article["status"] == "draft"

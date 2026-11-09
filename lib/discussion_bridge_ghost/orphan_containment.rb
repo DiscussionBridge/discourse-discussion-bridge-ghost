@@ -133,8 +133,9 @@ module DiscussionBridgeGhost
 
     def retained_dispatch!(mapping_row, article)
       operation = @state.fetch("operation")
-      [operation, operation["prior"]].each do |candidate|
-        next unless candidate.is_a?(Hash) && candidate["publish_started"] && candidate["html"].is_a?(String)
+      unrecorded = @state["unrecorded_dispatch"]
+      [operation, operation["prior"], unrecorded].each do |candidate|
+        next unless candidate.is_a?(Hash) && candidate["publish_started"]
         work_id = recorded_work_id(candidate)
         next unless work_id
         work = mapping_row.work_items.find_by(work_id: work_id)
@@ -146,10 +147,17 @@ module DiscussionBridgeGhost
         title = candidate["title"] || source["title"]
         next unless source_url.is_a?(String) && source_url == source["topic_url"] &&
           title.is_a?(String) && title == source["title"] && title == article["title"]
-        next unless managed_article?(candidate.fetch("html"), work.source_revision) &&
-          managed_article?(article.fetch("html"), work.source_revision)
-
-        digest = fragment_digest(candidate.fetch("html"), source_url: source_url)
+        next unless managed_article?(article.fetch("html"), work.source_revision)
+        digest = if candidate.equal?(unrecorded)
+          baseline = native_baseline
+          next unless baseline && baseline["revision"] == work.source_revision &&
+            baseline["digest"] == candidate["digest"] && baseline["source_url"] == source_url && baseline["title"] == title
+          candidate["digest"]
+        else
+          html = candidate["html"]
+          next unless html.is_a?(String) && managed_article?(html, work.source_revision)
+          fragment_digest(html, source_url: source_url)
+        end
         next unless matching_fragment?(article.fetch("html"), digest, source_url)
 
         return { work_id: work_id, revision: work.source_revision, title: title, source_url: source_url, digest: digest }

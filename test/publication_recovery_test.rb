@@ -81,11 +81,11 @@ class PublicationRecoveryTest < Minitest::Test
     @publisher.instance_variable_set(:@ghost, ghost)
     @publisher.define_singleton_method(:refresh_lease!) { calls << :renew_withdrawal }
 
-    error = assert_raises(Error) { @publisher.send(:prepare_withdrawal, {}) }
+    error = assert_raises(Error) { @publisher.send(:apply_withdrawal!, {}) }
     assert_equal "native_ownership_conflict", error.code
     assert_empty calls
     native = article
-    @publisher.send(:prepare_withdrawal, {})
+    @publisher.send(:apply_withdrawal!, {})
     assert_equal [:renew_withdrawal, [:withdraw, article.fetch("id"), original]], calls
     assert_equal "draft", state.fetch("native_baseline").fetch("status")
   end
@@ -111,6 +111,33 @@ class PublicationRecoveryTest < Minitest::Test
     assert_equal [:locked, :renewed, :synchronized], events
     assert_equal scope.merge("digest" => "proved", "revision" => "current-source", "native_revision" => article.fetch("updated_at")),
       @publisher.instance_variable_get(:@state).fetch("supervised_publication")
+  end
+
+  def test_terminal_scoped_edit_updates_the_stamp_and_retains_unrecorded_dispatch
+    article = owned_article
+    source_url = "https://discourse.example.test/t/1"
+    scope = { "connection_id" => "dbc_example", "category_id" => 21, "native_id" => article.fetch("id") }
+    work = Struct.new(:action, :source_revision, :work_id, :source_snapshot).new(
+      "publish_revision", "terminal-edit", "work-B", { "topic_url" => source_url, "title" => article.fetch("title") },
+    )
+    @publisher.instance_variable_set(:@withdraw_only, true)
+    @publisher.define_singleton_method(:scoped_dispatch_identity) { scope }
+    stub_article(article)
+    operation = { "publish_started" => true, "html" => article.fetch("html"), "revision" => work.source_revision }
+    state = @publisher.instance_variable_get(:@state)
+    err = assert_raises(Error) { @publisher.send(:reconcile_prior!, operation, work) }
+    assert_equal "native_restore_required", err.code
+    refute state.key?("native_baseline")
+    refute state.key?("unrecorded_dispatch")
+
+    operation["supervised_dispatch"] = scope.dup
+    @publisher.send(:reconcile_prior!, operation, work)
+    stamp = state.fetch("supervised_publication")
+    baseline = state.fetch("native_baseline")
+    assert_equal work.source_revision, stamp.fetch("revision")
+    assert_equal stamp.slice("digest", "revision", "native_revision"), baseline.slice("digest", "revision", "native_revision")
+    assert_equal work.work_id, state.fetch("unrecorded_dispatch").fetch("work_id")
+    assert_equal baseline.fetch("digest"), state.fetch("unrecorded_dispatch").fetch("digest")
   end
 
   def test_failure_code_distinguishes_permanent_public_proof_and_transient_native_errors
