@@ -19,6 +19,7 @@ function runLoader(fetch, mode = null, { managed = true, inArticle = false } = {
   const mounted = [];
   const article = {};
   const document = {
+    head: { append() {} },
     currentScript: {
       src: "https://forum.example/ghost/comments.js",
       getAttribute: () => mode,

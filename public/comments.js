@@ -81,9 +81,52 @@
       brand.className = "discussionbridge-credit__brand";
       brand.href = "https://discussionbridge.dev/";
       brand.textContent = "DiscussionBridge";
-      brand.style.color = "inherit";
       brand.style.fontWeight = "600";
       credit.append("Connected by ", brand);
+      const creditStyles = document.createElement("style");
+      if (script.nonce) {
+        creditStyles.nonce = script.nonce;
+      }
+      creditStyles.textContent = `
+        footer.discussionbridge-credit > a.discussionbridge-credit__brand {
+          position: relative;
+          padding-inline: 0.2em;
+          border-radius: 0.2em;
+          color: inherit;
+          text-decoration: none;
+          transition: color 160ms ease, background-color 160ms ease;
+        }
+        .discussionbridge-credit > .discussionbridge-credit__brand::after {
+          position: absolute;
+          inset-inline: 0.2em;
+          bottom: -0.12em;
+          height: 1px;
+          background: currentColor;
+          content: "";
+          transform: scaleX(0);
+          transform-origin: center;
+          transition: transform 180ms ease;
+        }
+        footer.discussionbridge-credit > a.discussionbridge-credit__brand:is(:hover, :focus-visible) {
+          color: var(--ghost-accent-color, #3451b2);
+          color: color-mix(in srgb, var(--ghost-accent-color, #3451b2) 68%, currentColor);
+          background-color: color-mix(in srgb, var(--ghost-accent-color, #3451b2) 10%, transparent);
+        }
+        .discussionbridge-credit > .discussionbridge-credit__brand:is(:hover, :focus-visible)::after {
+          transform: scaleX(1);
+        }
+        .discussionbridge-credit > .discussionbridge-credit__brand:focus-visible {
+          outline: 2px solid currentColor;
+          outline-offset: 0.2em;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          footer.discussionbridge-credit > a.discussionbridge-credit__brand,
+          .discussionbridge-credit > .discussionbridge-credit__brand::after {
+            transition: none;
+          }
+        }
+      `;
+      document.head.append(creditStyles);
       target.replaceChildren(header, content, credit);
       target.setAttribute("data-discussion-bridge-ghost-comments", "loaded");
     } catch {
