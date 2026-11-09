@@ -3,6 +3,7 @@ export default {
   path: "/plugins",
 
   map() {
+    this.route("discussion-bridge-ghost", { path: "ghost" });
     this.route("discussion-bridge-ghost-setup", { path: "setup" });
   },
 };

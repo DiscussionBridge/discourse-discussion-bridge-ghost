@@ -1,8 +1,13 @@
 import Route from "@ember/routing/route";
-import { ajax } from "discourse/lib/ajax";
+import { service } from "@ember/service";
 
 export default class DiscussionBridgeGhostSetupRoute extends Route {
-  model() {
-    return ajax("/discussion-bridge-ghost/admin/connections.json");
+  @service router;
+
+  beforeModel() {
+    this.router.replaceWith(
+      "adminPlugins.show.discussion-bridge-ghost",
+      "discourse-discussion-bridge"
+    );
   }
 }

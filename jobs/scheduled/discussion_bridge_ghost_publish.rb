@@ -7,9 +7,13 @@ module Jobs
     every 1.minute
     sidekiq_options retry: false
 
-    def execute(_args)
-      return unless defined?(::DiscussionBridge::CmsRecordStore) &&
+    def self.globally_enabled?
+      defined?(::DiscussionBridge::CmsRecordStore) &&
         SiteSetting.discussion_bridge_enabled && SiteSetting.discussion_bridge_endpoint_enabled
+    end
+
+    def execute(_args)
+      return unless self.class.globally_enabled?
 
       interval = SiteSetting.discussion_bridge_ghost_sync_interval_minutes.minutes.to_i
       return unless Discourse.redis.set(CADENCE_KEY, "1", nx: true, ex: interval)

@@ -8,7 +8,10 @@ module DiscussionBridgeGhost
     rescue_from DiscussionBridgeGhost::Error, with: :render_setup_error
 
     def index
-      render json: { connections: AdminSetup.connections }
+      sites = AdminSetup.connections.group_by { |connection| connection.fetch(:origin) }.map do |origin, connections|
+        { origin: origin, connections: connections }
+      end
+      render json: { sites: sites }
     end
 
     def update

@@ -3,6 +3,7 @@ import { tracked } from "@glimmer/tracking";
 import { fn } from "@ember/helper";
 import { on } from "@ember/modifier";
 import { action } from "@ember/object";
+import { LinkTo } from "@ember/routing";
 import { ajax } from "discourse/lib/ajax";
 import { popupAjaxError } from "discourse/lib/ajax-error";
 import { eq } from "discourse/truth-helpers";
@@ -33,6 +34,10 @@ class GhostDirection extends Component {
     return this.outbound
       ? "discussion_bridge_ghost.admin.admin_key"
       : "discussion_bridge_ghost.admin.content_key";
+  }
+
+  get publishingStatus() {
+    return i18n(`discussion_bridge_ghost.admin.status.${this.saved.publishing_status}`);
   }
 
   get needsCredential() {
@@ -84,6 +89,8 @@ class GhostDirection extends Component {
     <form class="form-vertical" {{on "submit" this.save}}>
       <fieldset disabled={{this.saving}}>
         <legend>{{i18n this.heading}}</legend>
+        <p>{{i18n "discussion_bridge_ghost.admin.content_connection"}}: {{@connection.name}}</p>
+        <p role="status">{{this.publishingStatus}}</p>
         <label>
           <input type="checkbox" checked={{this.enabled}} {{on "change" (fn this.change "enabled")}} />
           {{i18n "discussion_bridge_ghost.admin.enabled"}}
@@ -146,16 +153,16 @@ class GhostDirection extends Component {
 }
 
 export default <template>
-  <h1>{{i18n "discussion_bridge_ghost.admin.title"}}</h1>
   <p>{{i18n "discussion_bridge_ghost.admin.intro"}}</p>
-  <p><a href="/admin/plugins/discourse-discussion-bridge/connections">{{i18n "discussion_bridge_ghost.admin.connections"}}</a></p>
+  <p><LinkTo @route="adminPlugins.show.discussion-bridge-connections">{{i18n "discussion_bridge_ghost.admin.connections"}}</LinkTo></p>
 
-  {{#each @controller.model.connections as |connection|}}
-    <section>
-      <h2>{{connection.name}}</h2>
-      <p>{{connection.origin}}</p>
-      {{#each connection.directions as |direction|}}
-        <GhostDirection @connection={{connection}} @direction={{direction}} />
+  {{#each @controller.model.sites key="origin" as |site|}}
+    <section class="discussion-bridge-ghost-site">
+      <h2>{{site.origin}}</h2>
+      {{#each site.connections key="id" as |connection|}}
+        {{#each connection.directions key="id" as |direction|}}
+          <GhostDirection @connection={{connection}} @direction={{direction}} />
+        {{/each}}
       {{/each}}
     </section>
   {{else}}

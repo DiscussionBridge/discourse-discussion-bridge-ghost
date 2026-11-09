@@ -156,15 +156,19 @@ module DiscussionBridgeGhost
     end
 
     def inbound_scope?
+      self.class.scope_allows?(@connection, @tag)
+    end
+
+    def self.scope_allows?(connection, tag)
       scope = SupervisedScope::CURRENT
       return true unless scope.category("inbound")
 
-      descriptor = ::DiscussionBridge::CmsConfiguration.current!(@connection, required_direction: "to_discourse")
+      descriptor = ::DiscussionBridge::CmsConfiguration.current!(connection, required_direction: "to_discourse")
       lane = ::DiscussionBridge::LanePolicies.resolve(
         value: SiteSetting.discussion_bridge_lane_policies, lane: descriptor.fetch("publication_lane"),
       )
-      category_id = lane.category_id || @connection.default_category_id || SiteSetting.discussion_bridge_effective_category_id
-      lane.allowed && scope.inbound?(@connection_id, category_id.to_i, @tag)
+      category_id = lane.category_id || connection.default_category_id || SiteSetting.discussion_bridge_effective_category_id
+      lane.allowed && scope.inbound?(connection.public_id, category_id.to_i, tag)
     end
 
     def resolve(input)

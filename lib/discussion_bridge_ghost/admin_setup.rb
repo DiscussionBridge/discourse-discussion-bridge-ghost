@@ -48,6 +48,7 @@ module DiscussionBridgeGhost
       {
         id: @direction,
         enabled: saved.present?,
+        publishing_status: publishing_status(saved),
         admin_url: saved["admin_url"] || @connection.cms_configuration.fetch("destination_origin"),
         credential_saved: saved[@key_name].present?,
         kind: saved["kind"] || "post",
@@ -69,6 +70,30 @@ module DiscussionBridgeGhost
     end
 
     private
+
+    def publishing_status(saved)
+      return "disabled" if saved.blank?
+
+      outbound = @direction == "from_discourse"
+      direction = outbound ? "outbound" : "inbound"
+      scope = SupervisedScope::CURRENT
+      return "paused" unless scope.active?(direction)
+      return "outside_scope" unless scope.connection?(direction, @connection.public_id)
+      return "unavailable" unless ::Jobs::DiscussionBridgeGhostPublish.globally_enabled? && !Discourse.readonly_mode?
+
+      if outbound
+        return "unavailable" unless ::DiscussionBridge::CmsSourceLifecycle.globally_enabled?
+
+        _, descriptor = ConnectionCheck.receiver(@connection.public_id)
+        Publication.validate_policy!(descriptor)
+      elsif !InboundPublishing.scope_allows?(@connection, saved["tag"])
+        return "outside_scope"
+      end
+
+      scope.category(direction) ? "scoped" : "scheduled"
+    rescue Error, ::DiscussionBridge::CmsProtocol::Error
+      "unavailable"
+    end
 
     def enable!(options)
       admin_url = text_option(options, "admin_url", max: 2048)

@@ -7,12 +7,12 @@ en:
     discussion_bridge_ghost:
       admin:
         title: "DiscussionBridge Ghost"
+        tab: "Ghost"
         setup: "Setup"
         setup_description: "Configure automatic publishing between Discourse and Ghost."
-        settings: "Settings"
-        settings_description: "Set how often automatic Ghost sync runs."
         intro: "Choose an enabled Ghost Content Connection and configure each publishing direction separately. Use the keys from a Ghost custom integration."
         connections: "Manage DiscussionBridge Content Connections"
+        content_connection: "Content Connection"
         empty: "Create or enable a Ghost Content Connection and configure it for R7 to get started."
         outbound: "Discourse to Ghost"
         inbound: "Ghost to Discourse"
@@ -28,3 +28,10 @@ en:
         tag: "Ghost tag slug"
         save: "Save"
         saved: "Saved"
+        status:
+          disabled: "Automatic publishing off"
+          paused: "Publishing paused"
+          outside_scope: "Publishing paused for this connection"
+          unavailable: "Publishing unavailable"
+          scoped: "Publishing enabled within the test scope"
+          scheduled: "Automatic publishing enabled"

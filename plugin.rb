@@ -14,6 +14,7 @@ require_relative "lib/discussion_bridge_ghost/supervised_scope"
 require_relative "lib/discussion_bridge_ghost/automatic_publishing"
 require_relative "lib/discussion_bridge_ghost/inbound_publishing"
 require_relative "lib/discussion_bridge_ghost/admin_setup"
+require_relative "lib/discussion_bridge_ghost/packaged_plugin_metadata"
 
 add_admin_route("discussion_bridge_ghost.admin.title", "discourse-discussion-bridge-ghost", use_new_show_route: true)
 Rails.application.config.filter_parameters << :ghost_credential
@@ -22,6 +23,8 @@ after_initialize do
   require_relative "jobs/scheduled/discussion_bridge_ghost_publish"
   require_relative "app/controllers/discussion_bridge_ghost/admin_connections_controller"
   require_relative "app/controllers/discussion_bridge_ghost/public_comments_controller"
+
+  ::AdminPluginSerializer.prepend(DiscussionBridgeGhost::PackagedPluginMetadata)
 
   Discourse::Application.routes.append do
     get "/discussion-bridge-ghost/comments.js" => "discussion_bridge_ghost/public_comments#loader"

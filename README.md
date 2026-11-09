@@ -49,7 +49,7 @@ For eligible failed work, use the R7 attention controls to request a check. A sc
 
 ## Automatic publishing
 
-Open **Admin → Plugins → DiscussionBridge Ghost → Setup**. Use an enabled Ghost Content Connection configured for R7 in **DiscussionBridge → Connections**. The setup page shows the directions allowed by that connection.
+Open **Admin → Plugins → DiscussionBridge → Ghost**. The Ghost plugin's **Settings** link opens the same tab. Use an enabled Ghost Content Connection configured for R7 in **DiscussionBridge → Connections**. Each site panel shows the directions allowed by its connections and the effective publishing status alongside the saved settings.
 
 - **Discourse to Ghost.** Enable the direction, enter the Ghost API base URL and Admin API key, and choose posts or pages for new publications. You can add an optional URL label. The connection's R7 From Discourse policy controls the eligible topics. The connector uses Simple presentation and Ghost's default root routing.
 - **Ghost to Discourse.** Enable the direction, enter the Ghost API base URL and Content API key, and choose the Ghost tag slug to import. The connection needs a usable author and destination category. Tagged public posts and pages create unlisted topics under the connection's R7 rules. Edits update the original topic. Full article imports must fit the R7 source and request limits. [Ghost Content API](https://docs.ghost.org/content-api)
