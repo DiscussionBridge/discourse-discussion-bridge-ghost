@@ -11,13 +11,7 @@ module DiscussionBridgeGhost
       guardian = Guardian.new
       raise Error.new("source_ineligible") unless guardian.can_see_topic?(topic)
 
-      replies = Post.where(topic_id: topic.id, post_type: Post.types[:regular], hidden: false)
-        .where("post_number > 1").order(:post_number).limit(50)
-        .filter_map do |post|
-          next unless guardian.can_see_post?(post)
-          text = Nokogiri::HTML5.fragment(post.cooked).text
-          "<li>#{CGI.escapeHTML(text)}</li>"
-        end
+      replies = public_replies(topic, guardian).map { |text| "<li>#{CGI.escapeHTML(text)}</li>" }
       comments = replies.empty? ? "<p>No comments yet.</p>" : "<ol>#{replies.join}</ol>"
       link = CGI.escapeHTML(source.fetch("topic_url"))
       revision = CGI.escapeHTML(source.fetch("source_revision"))
@@ -27,6 +21,15 @@ module DiscussionBridgeGhost
         <section data-db-mode="simple"><h2>Comments</h2>#{comments}<a data-db-discussion="true" href="#{link}">Open discussion</a></section>
         </section>
       HTML
+    end
+
+    def self.public_replies(topic, guardian)
+      Post.where(topic_id: topic.id, post_type: Post.types[:regular], hidden: false, deleted_at: nil)
+        .where("post_number > 1").order(:post_number).limit(50)
+        .filter_map do |post|
+          next unless guardian.can_see_post?(post)
+          Nokogiri::HTML5.fragment(post.cooked).text
+        end
     end
 
     def self.digest(html, owner:, source_url:, ghost_url:)

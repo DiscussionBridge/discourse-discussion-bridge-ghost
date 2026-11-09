@@ -2,6 +2,10 @@ en:
   site_settings:
     discussion_bridge_ghost_sync_interval_minutes: "Minutes between automatic DiscussionBridge Ghost sync runs."
   discussion_bridge_ghost:
+    comments:
+      title: "Comments"
+      empty: "No comments yet."
+      discussion: "Open discussion"
     setup_errors:
       save_failed: "Ghost setup could not be saved (%{code})."
       r7_receiver_required: "Ghost setup requires the DiscussionBridge R7 receiver."

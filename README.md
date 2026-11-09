@@ -55,3 +55,15 @@ Save each direction separately. Leave the key field blank to retain the saved ke
 ### Sync interval
 
 In Discourse Admin Site Settings, search for `discussion_bridge_ghost_sync_interval_minutes`. The setting applies to both automatic directions and defaults to 5 minutes. Set it to a value from 1 to 60 minutes. Discourse checks whether a sync is due every minute and uses the new value when the current interval expires.
+
+## Public Ghost comments
+
+Add the following script to the Ghost site footer under **Settings → Code injection**, or to a single article's footer. Replace the example URL with the HTTPS URL of the Discourse site running this connector.
+
+```html
+<script defer src="https://discourse.example.com/discussion-bridge-ghost/comments.js"></script>
+```
+
+The loader uses the current Ghost article URL to find its R7 discussion and shows up to 50 guest-visible replies. It supports Ghost articles imported into Discourse and Simple articles published from Discourse. The reader can open the linked topic to join the discussion.
+
+To choose where the comments appear, put `<div data-discussion-bridge-ghost-comments></div>` in the Ghost theme or article. The loader otherwise uses the existing Simple comments section when present, or adds a section to the article.
