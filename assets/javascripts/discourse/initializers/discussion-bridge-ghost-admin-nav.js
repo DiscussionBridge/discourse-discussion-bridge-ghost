@@ -25,6 +25,7 @@ export default {
         ]);
       }
 
+      api.setAdminPluginIcon("discourse-discussion-bridge-ghost", "bridge");
       api.addAdminPluginConfigurationNav("discourse-discussion-bridge-ghost", [
         {
           label: "discussion_bridge_ghost.admin.setup",
