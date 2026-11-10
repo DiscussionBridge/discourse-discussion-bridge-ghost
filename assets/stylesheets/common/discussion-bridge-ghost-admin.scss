@@ -1,0 +1,14 @@
+// Font Awesome Free, Bridge Classic Solid by Fonticons, Inc. (CC BY 4.0)
+// https://fontawesome.com/icons/classic/solid/bridge
+// Discourse's plugin tab links do not expose the navigation item's icon argument.
+.admin-plugin-config-page__top-nav-item > a[href$="/admin/plugins/discourse-discussion-bridge/ghost"]::before {
+  content: "";
+  display: inline-block;
+  inline-size: 1em;
+  block-size: 1em;
+  flex: none;
+  margin-inline-end: 0.4em;
+  vertical-align: -0.125em;
+  background-color: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20576%20512%22%3E%3Cpath%20d%3D%22M32%2032C14.3%2032%200%2046.3%200%2064S14.3%2096%2032%2096l40%200%200%2064L0%20160%200%20288c53%200%2096%2043%2096%2096l0%2064c0%2017.7%2014.3%2032%2032%2032l32%200c17.7%200%2032-14.3%2032-32l0-64c0-53%2043-96%2096-96s96%2043%2096%2096l0%2064c0%2017.7%2014.3%2032%2032%2032l32%200c17.7%200%2032-14.3%2032-32l0-64c0-53%2043-96%2096-96l0-128-72%200%200-64%2040%200c17.7%200%2032-14.3%2032-32s-14.3-32-32-32L32%2032zM456%2096l0%2064-80%200%200-64%2080%200zM328%2096l0%2064-80%200%200-64%2080%200zM200%2096l0%2064-80%200%200-64%2080%200z%22%2F%3E%3C%2Fsvg%3E") center / contain no-repeat;
+}

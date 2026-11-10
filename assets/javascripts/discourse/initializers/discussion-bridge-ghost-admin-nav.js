@@ -14,6 +14,7 @@ export default {
       const receiver = "discourse-discussion-bridge";
       const receiverNav = configNavForPlugin(receiver);
       if (receiverNav) {
+        api.setAdminPluginIcon(receiver, "bridge");
         api.addAdminPluginConfigurationNav(receiver, [
           ...receiverNav.links,
           {

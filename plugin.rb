@@ -17,6 +17,8 @@ require_relative "lib/discussion_bridge_ghost/admin_setup"
 require_relative "lib/discussion_bridge_ghost/packaged_plugin_metadata"
 
 add_admin_route("discussion_bridge_ghost.admin.title", "discourse-discussion-bridge-ghost", use_new_show_route: true)
+register_svg_icon "bridge"
+register_asset "stylesheets/common/discussion-bridge-ghost-admin.scss"
 Rails.application.config.filter_parameters << :ghost_credential
 
 after_initialize do
