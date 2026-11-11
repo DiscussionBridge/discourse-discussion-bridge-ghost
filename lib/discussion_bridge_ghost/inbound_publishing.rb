@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "cgi"
 require "digest"
 require "securerandom"
 require "time"
@@ -133,8 +134,8 @@ module DiscussionBridgeGhost
       status, = @ghost.public_article(source.fetch("canonical_url"))
       raise Error.new("ghost_source_not_public", status: status) unless status == 200
       source["expected_source_revision"] = revision
+      source = publication_representation(source, fragment)
       input = { "mutation_id" => SecureRandom.uuid, "bridge_record" => source }
-      raise Error.new("body_too_large") if JSON.generate(input).bytesize > 65_536
 
       response = resolve(input)
       return unless response
@@ -205,7 +206,6 @@ module DiscussionBridgeGhost
       # Use the pinned receiver's target-preserving conversion before hashing.
       ::DiscussionBridge::PortableContent.send(:resolve_references!, fragment, canonical)
       html = fragment.to_html
-      raise Error.new("body_too_large") if html.bytesize > 49_152
       authors = entry["authors"]
       unless authors.is_a?(Array) && authors.all? { |author| author.is_a?(Hash) }
         raise Error.new("ghost_source_metadata_invalid")
@@ -223,6 +223,39 @@ module DiscussionBridgeGhost
       source["primary_source_author_id"] = authors.first.fetch("id") if authors.any?
       source["source_revision"] = Digest::SHA256.hexdigest(JSON.generate(source))
       source
+    end
+
+    def publication_representation(source, fragment)
+      codec = ::DiscussionBridge::CmsGeneratedExcerpt
+      full_bytes = ::DiscussionBridge::CmsProtocol.semantic_identity(
+        { "mutation_id" => codec::MEASUREMENT_ID, "bridge_record" => source },
+      ).bytesize
+      return source if source.fetch("source_content_bytes") <= 49_152 && full_bytes <= 65_536
+
+      # Keep complete top-level HTML nodes. A single large block still has a
+      # usable excerpt without splitting markup or multibyte characters.
+      article = +""
+      fragment.children.each do |node|
+        html = node.to_html
+        break if article.bytesize + html.bytesize > 8_192 || html.downcase.include?(codec::MARKER)
+        article << html
+      end
+      if article.strip.empty?
+        prefix = fragment.text.strip.each_char.take(1_024).join
+        raise Error.new("content_preservation_unavailable") if prefix.empty?
+
+        article = "<p>#{CGI.escapeHTML(prefix)}</p>"
+      end
+      canonical = source.fetch("canonical_url")
+      selected = source.merge(
+        "content_html" => article + codec.link(canonical),
+        "representation" => {
+          "kind" => "generated_excerpt", "article_content_bytes" => article.bytesize,
+          "article_content_sha256" => Digest::SHA256.hexdigest(article.b), "read_more_url" => canonical,
+          "selection_full_request_bytes" => full_bytes, "selection_source_revision" => source.fetch("source_revision"),
+        },
+      )
+      codec.validate_envelope!(selected)
     end
 
     def log(code, id = nil)

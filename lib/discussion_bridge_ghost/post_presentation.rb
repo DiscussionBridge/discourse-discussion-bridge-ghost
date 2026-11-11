@@ -3,6 +3,7 @@
 require "cgi"
 require "digest"
 require "nokogiri"
+require "uri"
 
 module DiscussionBridgeGhost
   class PostPresentation
@@ -12,10 +13,26 @@ module DiscussionBridgeGhost
       raise Error.new("source_ineligible") unless guardian.can_see_topic?(topic)
 
       link = CGI.escapeHTML(source.fetch("topic_url"))
+      title = CGI.escapeHTML(source.fetch("title"))
       revision = CGI.escapeHTML(source.fetch("source_revision"))
+      first = Post.find_by(topic_id: topic.id, post_number: 1)
+      author = first&.user if first && guardian.can_see_post?(first)
+      origin = URI.parse(source.fetch("topic_url"))
+      byline = source.fetch("source_authors").map do |entry|
+        label = CGI.escapeHTML(entry.fetch("name"))
+        if author&.active? && !author.staged? && author.id.to_s == entry.fetch("id") &&
+            author.username.match?(/\A[a-z0-9_][a-z0-9_.-]*\z/i)
+          profile = CGI.escapeHTML((origin + "/u/#{author.username}").to_s)
+          %(<a data-db-source-author="true" href="#{profile}">#{label}</a>)
+        else
+          label
+        end
+      end.join(", ")
+      byline = byline.empty? ? "" : "<p>Originally authored by #{byline}</p>"
       <<~HTML.chomp
         <section data-db-owner="#{owner}" data-db-resource="#{resource}" data-db-native="#{native_id}" data-db-revision="#{revision}">
         <div data-db-article="true">#{article}</div>
+        <aside class="discussionbridge-publication">#{byline}<p>Originally published as <a data-db-source-title="true" href="#{link}">#{title}</a>.</p></aside>
         <section data-db-mode="simple"><a data-db-discussion="true" href="#{link}">Open discussion</a></section>
         </section>
       HTML
@@ -66,6 +83,25 @@ module DiscussionBridgeGhost
       raise Error.new("public_verification_failed") unless [source_url, rewritten].include?(links.first["href"])
 
       links.first["href"] = source_url
+      sources = fragment.css("a[data-db-source-title]")
+      raise Error.new("public_verification_failed") if sources.size > 1
+      if (source = sources.first)
+        raise Error.new("public_verification_failed") unless [source_url, rewritten].include?(source["href"])
+
+        source["href"] = source_url
+      end
+      forum = URI.parse(source_url)
+      fragment.css("a[data-db-source-author]").each do |anchor|
+        profile = URI.parse(anchor["href"].to_s)
+        if [profile.scheme, profile.host, profile.port] == [forum.scheme, forum.host, forum.port] &&
+            !profile.userinfo && !profile.fragment && profile.path.to_s.match?(%r{\A/u/[a-z0-9_][a-z0-9_.-]*\z}i) &&
+            profile.query == "ref=#{referral}"
+          profile.query = nil
+          anchor["href"] = profile.to_s
+        end
+      rescue URI::InvalidURIError
+        raise Error.new("public_verification_failed")
+      end
       Digest::SHA256.hexdigest(fragment.to_html)
     end
   end
