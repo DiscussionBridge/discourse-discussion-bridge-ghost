@@ -29,7 +29,7 @@ jobs:
         run: gem install --user-install --no-document minitest --version 6.0.6
       - name: Run connector Ruby tests
         run: |
-          git ls-files -z -- '*.rb' | xargs -0 -n 1 ruby -c
+          git -c safe.directory="$PWD" ls-files -z -- '*.rb' | xargs -0 -n 1 ruby -c
           for suite in test/*_test.rb; do
             ruby -e 'gem "minitest", "6.0.6"; load ARGV.shift' "$suite"
           done
