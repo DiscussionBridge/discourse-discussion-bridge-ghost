@@ -13,6 +13,7 @@ function runLoader(fetch, mode = null, { managed = true, inArticle = false } = {
   const block = {
     children: [snapshot, link],
     querySelectorAll: () => [link],
+    append(...children) { this.children.push(...children); },
     replaceChildren(...children) { this.children = children; },
     setAttribute(name, value) { this[name] = value; },
   };
@@ -37,7 +38,7 @@ function runLoader(fetch, mode = null, { managed = true, inArticle = false } = {
     }),
   };
   vm.runInNewContext(loader, {
-    document, URL, fetch,
+    document, URL, fetch, window: { addEventListener() {} },
     location: { protocol: "https:", origin: "https://ghost.example", pathname: "/article/" },
   });
   return { block, link, mounted };
@@ -99,6 +100,29 @@ test("an Interactive article without a verified discussion never mounts a frame"
   const { block, link } = runLoader(async () => ({ ok: false, status: 404 }), "interactive");
   await new Promise(setImmediate);
   assert.deepEqual(block.children, [link]);
+});
+
+test("the receiver selects Simple, Full, or Interactive for an imported article", async () => {
+  const frame = "https://forum.example/embed/comments?topic_id=54";
+  const expected = {
+    simple: { tag: "ol", src: undefined },
+    full: { tag: "iframe", src: frame },
+    interactive: { tag: "iframe", src: frame + "&full_app=true" },
+  };
+
+  for (const [presentation_mode, content] of Object.entries(expected)) {
+    const { block } = runLoader(async () => ({
+      ok: true,
+      json: async () => ({
+        topic_id: 54, topic_path: "/t/source/54", title: "Discussion",
+        replies: ["public reply"], discussion: "Open in forum", presentation_mode,
+      }),
+    }), presentation_mode === "interactive" ? null : "interactive");
+    await new Promise(setImmediate);
+    assert.equal(block["data-discussion-bridge-ghost-comments"], "loaded");
+    assert.equal(block.children[1].tag, content.tag);
+    assert.equal(block.children[1].src, content.src);
+  }
 });
 
 test("an Interactive source article mounts at its theme script inside the post body", async () => {

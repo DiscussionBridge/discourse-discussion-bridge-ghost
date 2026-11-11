@@ -34,7 +34,7 @@ module DiscussionBridgeGhost
         <section data-db-owner="#{owner}" data-db-resource="#{resource}" data-db-native="#{native_id}" data-db-revision="#{revision}">
         <div data-db-article="true">#{article}</div>
         <aside class="discussionbridge-publication">#{byline}<p>Originally published as <a data-db-source-title="true" href="#{link}">#{title}</a> on #{forum}.</p></aside>
-        <section data-db-mode="simple"><a data-db-discussion="true" href="#{link}">Open discussion</a></section>
+        <section data-db-mode="simple"><a data-db-discussion="true" href="#{link}">Open in forum</a></section>
         </section>
       HTML
     end

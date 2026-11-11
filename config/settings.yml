@@ -1,4 +1,7 @@
 plugins:
+  discussion_bridge_ghost_credit_enabled:
+    default: true
+    client: false
   discussion_bridge_ghost_sync_interval_minutes:
     type: integer
     default: 5

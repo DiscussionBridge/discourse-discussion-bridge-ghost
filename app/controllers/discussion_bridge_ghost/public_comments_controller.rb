@@ -7,8 +7,10 @@ module DiscussionBridgeGhost
     # The static script is intentionally embedded by Ghost on another origin.
     skip_before_action :verify_authenticity_token, only: :loader
 
-    LOADER = File.binread(File.expand_path("../../../public/comments.js", __dir__)).freeze
-    PublicLink = Data.define(:binding, :topic, :identity)
+    LOADER = %w[comments.js discussion-labels.js].map do |name|
+      File.binread(File.expand_path("../../../public/#{name}", __dir__))
+    end.join("\n").freeze
+    PublicLink = Data.define(:binding, :topic, :identity, :presentation_mode)
 
     def loader
       render plain: LOADER, content_type: "application/javascript"
@@ -17,24 +19,35 @@ module DiscussionBridgeGhost
     def show
       response.headers["Cache-Control"] = "no-store"
       origin = request.headers["Origin"]
-      topic = public_topic(params[:url], origin)
-      raise Discourse::NotFound unless topic
+      link = public_link(params[:url], origin)
+      raise Discourse::NotFound unless link
+
+      topic = link.topic
 
       response.headers["Access-Control-Allow-Origin"] = origin
       response.headers["Vary"] = [response.headers["Vary"], "Origin"].compact.join(", ")
       render json: {
         topic_id: topic.id,
         topic_path: topic.relative_url,
+        presentation_mode: link.presentation_mode,
         replies: PostPresentation.public_replies(topic, Guardian.new),
         title: I18n.t("discussion_bridge_ghost.comments.title"),
         empty: I18n.t("discussion_bridge_ghost.comments.empty"),
         discussion: I18n.t("discussion_bridge_ghost.comments.discussion"),
+        forum_name: public_forum_name,
+        credit_enabled: SiteSetting.discussion_bridge_ghost_credit_enabled,
       }
     end
 
     private
 
-    def public_topic(url, origin)
+    def public_forum_name
+      ::DiscussionBridge::CmsConfiguration.forum_name!
+    rescue ::DiscussionBridge::CmsProtocol::Error
+      nil
+    end
+
+    def public_link(url, origin)
       ConnectionCheck.require_receiver!
       return unless SiteSetting.discussion_bridge_enabled && SiteSetting.discussion_bridge_endpoint_enabled &&
         !SiteSetting.login_required && url.is_a?(String) && origin.present?
@@ -51,7 +64,7 @@ module DiscussionBridgeGhost
 
       # The network check can outlast a configuration, binding, or visibility change.
       confirmed = authorized_link(canonical)
-      confirmed.topic if confirmed && confirmed.binding.id == link.binding.id &&
+      confirmed if confirmed && confirmed.binding.id == link.binding.id &&
         confirmed.topic.id == link.topic.id && confirmed.identity == link.identity
     rescue Error, ArgumentError
       nil
@@ -89,17 +102,19 @@ module DiscussionBridgeGhost
       if outbound
         return unless configuration.dig("native_capabilities", "complete_content_supported")
 
-        identity = outbound_identity(binding, record, topic, configuration.fetch("policy"))
-        PublicLink.new(binding, topic, identity) if identity
+        policy = configuration.fetch("policy")
+        identity = outbound_identity(binding, record, topic, policy)
+        PublicLink.new(binding, topic, identity, policy.fetch("presentation_mode")) if identity
       elsif record.direction == "to_discourse" && binding.role == "source" &&
           record.cms_source_publication&.fetch("state", nil) == "active"
-        PublicLink.new(binding, topic, binding.external_id)
+        PublicLink.new(binding, topic, binding.external_id, nil)
       end
     end
 
     def outbound_identity(binding, record, topic, policy)
-      return unless binding.role == "presentation" && binding.presentation_mode == "simple" &&
-        policy.fetch("presentation_mode") == "simple" && policy.fetch("author_ids").empty? &&
+      # The binding records its initial mode. The current receiver policy owns presentation.
+      return unless binding.role == "presentation" &&
+        Publication::PRESENTATION_MODES.include?(policy.fetch("presentation_mode")) && policy.fetch("author_ids").empty? &&
         policy.fetch("taxonomy_ids").empty? && ::DiscussionBridge::CmsConfiguration.eligible?(topic, policy)
 
       mapping = DiscussionBridgeCmsMapping.find_by(content_binding_id: binding.id, mapping_state: %w[active pending])

@@ -2,6 +2,7 @@
 
 require "minitest/autorun"
 require_relative "../lib/discussion_bridge_ghost/inbound_publishing"
+require_relative "../lib/discussion_bridge_ghost/publication"
 
 module DiscussionBridge
   module CmsReceiptCipher
@@ -125,17 +126,20 @@ class GhostCommentsIdentityTest < Minitest::Test
   end
 
   def test_outbound_policy_is_checked_before_using_a_previously_verified_mapping
+    # Existing publications can have been created before the mode changed.
     binding = Data.define(:role, :presentation_mode).new("presentation", "simple")
     controller = DiscussionBridgeGhost::PublicCommentsController.new
-    policy = { "presentation_mode" => "simple", "author_ids" => [], "taxonomy_ids" => [] }
     topic = Object.new
-    assert_nil controller.send(:outbound_identity, binding, nil, topic, policy)
-    assert_equal [topic, policy], DiscussionBridge::CmsConfiguration.checked
+    %w[simple full interactive].each do |mode|
+      policy = { "presentation_mode" => mode, "author_ids" => [], "taxonomy_ids" => [] }
+      assert_nil controller.send(:outbound_identity, binding, nil, topic, policy)
+      assert_equal [topic, policy], DiscussionBridge::CmsConfiguration.checked
+    end
   end
 
   def test_copied_outbound_fragment_requires_the_original_current_public_native_article
     controller = DiscussionBridgeGhost::PublicCommentsController.new
-    link = DiscussionBridgeGhost::PublicCommentsController::PublicLink.new(OUTBOUND, Object.new, OWNED)
+    link = DiscussionBridgeGhost::PublicCommentsController::PublicLink.new(OUTBOUND, Object.new, OWNED, "full")
     refute controller.send(:current_native_page?, link, URL), "old exact URL displays a copied fragment after the original disappeared"
     assert_equal [[:public_page, URL], [:native_identity, "post", ORIGINAL_ID]], DiscussionBridgeGhost::GhostSite.reads
 
@@ -149,7 +153,7 @@ class GhostCommentsIdentityTest < Minitest::Test
   def test_manual_publication_without_a_saved_outbound_credential_refuses_live_replies
     PluginStore.outbound = nil
     controller = DiscussionBridgeGhost::PublicCommentsController.new
-    link = DiscussionBridgeGhost::PublicCommentsController::PublicLink.new(OUTBOUND, Object.new, OWNED)
+    link = DiscussionBridgeGhost::PublicCommentsController::PublicLink.new(OUTBOUND, Object.new, OWNED, "simple")
     refute controller.send(:current_native_page?, link, URL)
     assert_empty DiscussionBridgeGhost::GhostSite.reads
   end

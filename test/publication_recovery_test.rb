@@ -94,6 +94,7 @@ class PublicationRecoveryTest < Minitest::Test
     article = owned_article
     scope = { "connection_id" => "dbc_example", "category_id" => 21, "native_id" => article.fetch("id") }
     events = []
+    @publisher.instance_variable_set(:@current_work, Struct.new(:retry_of_work_id).new(nil))
     @publisher.instance_variable_set(:@revision, "current-source")
     @publisher.instance_variable_set(:@source, { "topic_url" => "https://discourse.example.test/t/1" })
     stub_article(article)

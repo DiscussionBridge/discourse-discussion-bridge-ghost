@@ -1,11 +1,12 @@
 en:
   site_settings:
     discussion_bridge_ghost_sync_interval_minutes: "Minutes between automatic DiscussionBridge Ghost sync runs."
+    discussion_bridge_ghost_credit_enabled: "Show Connected by DiscussionBridge on Ghost discussions served by this connector."
   discussion_bridge_ghost:
     comments:
-      title: "Comments"
+      title: "Discussion"
       empty: "No comments yet."
-      discussion: "Open discussion"
+      discussion: "Open in forum"
     setup_errors:
       save_failed: "Ghost setup could not be saved (%{code})."
       r7_receiver_required: "Ghost setup requires the DiscussionBridge R7 receiver."

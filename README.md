@@ -19,7 +19,7 @@ The check verifies the local receiver contract and schema identities, confirms t
 
 ## Publish or refresh one post or page
 
-Use the Rails console with a dynamic Ghost connection whose From Discourse policy allows the selected public topic, uses Simple, supports full content, and has no selected author or taxonomy overrides. This slice supports Ghost's default root `/{slug}/` routing and takes an optional `url_label` for the initial slug.
+Use the Rails console with a dynamic Ghost connection whose From Discourse policy allows the selected public topic, supports complete content, and has no selected author or taxonomy overrides. Select Simple, Full, or Interactive in the connection's CMS publication configuration. The connector supports Ghost's default root `/{slug}/` routing and takes an optional `url_label` for the initial slug.
 
 ```ruby
 require "io/console"
@@ -35,7 +35,7 @@ The command uses R7's in-process source lifecycle, mapping, lease, and acknowled
 
 Use `DiscussionBridgeGhost::PublishPage.call` with the same arguments to select a page on its first publication. Keep using the same command for that topic and connection. An existing mapping keeps its native type.
 
-Run the same command after a Discourse edit. It keeps the native ID and reserved URL, uses Ghost's `updated_at` write guard, and updates the owned article and its Simple discussion link. It verifies the public HTML anonymously before R7 records the source revision as verified. A replay of a verified revision rereads the native article and its public page. [Ghost update semantics](https://docs.ghost.org/admin-api/posts/updating-a-post) and [Ghost routing](https://docs.ghost.org/themes/routing).
+Run the same command after a Discourse edit. It keeps the native ID and reserved URL, uses Ghost's `updated_at` write guard, and updates the owned article and its discussion link. It verifies the public HTML anonymously before R7 records the source revision as verified. A replay of a verified revision rereads the native article and its public page. [Ghost update semantics](https://docs.ghost.org/admin-api/posts/updating-a-post) and [Ghost routing](https://docs.ghost.org/themes/routing).
 
 ## Withdraw and restore
 
@@ -51,7 +51,7 @@ For eligible failed work, use the R7 attention controls to request a check. A sc
 
 Open **Admin → Plugins → DiscussionBridge → Ghost**. The Ghost plugin's **Settings** link opens the same tab. Use an enabled Ghost Content Connection configured for R7 in **DiscussionBridge → Connections**. Each site panel shows the directions allowed by its connections and the effective publishing status alongside the saved settings.
 
-- **Discourse to Ghost.** Enable the direction, enter the Ghost API base URL and Admin API key, and choose posts or pages for new publications. You can add an optional URL label. The connection's R7 From Discourse policy controls the eligible topics. The connector uses Simple presentation and Ghost's default root routing.
+- **Discourse to Ghost.** Enable the direction, enter the Ghost API base URL and Admin API key, and choose posts or pages for new publications. You can add an optional URL label. The connection's R7 From Discourse policy controls eligible topics and discussion presentation. The connector uses Ghost's default root routing.
 - **Ghost to Discourse.** Enable the direction, enter the Ghost API base URL and Content API key, and choose the Ghost tag slug to import. The connection needs a usable author and destination category. Tagged public posts and pages create unlisted topics under the connection's R7 rules. Edits update the original topic. Articles that exceed the R7 body or request limits publish an excerpt with a Read More link to the original. [Ghost Content API](https://docs.ghost.org/content-api)
 
 Save each direction separately. Leave the key field blank to retain the saved key at the same API URL. Enter a new key to replace it or change the API URL. Discourse stores keys encrypted. To disable a direction, clear its checkbox and save.
@@ -72,10 +72,10 @@ For automatic placement, add the following script inside the article in the Ghos
 <script defer src="https://discourse.example.com/discussion-bridge-ghost/comments.js"></script>
 ```
 
-The loader uses the current Ghost article URL to find its R7 discussion and shows up to 50 guest-visible replies. It supports Ghost articles imported into Discourse and Simple articles published from Discourse. The reader can open the linked topic to join the discussion.
+The loader uses the current Ghost article URL to find its R7 discussion. For articles published from Discourse, the connection's selected discussion presentation controls what the loader displays. Simple shows up to 50 guest-visible replies. Full presents the discussion with the standard Discourse comments frame. Interactive uses the native full app.
 
-For the Interactive frame, add `data-discussion-bridge-ghost-mode="interactive"` to that article's script tag. The frame opens the linked topic in Discourse's native full app. In Discourse's Embedding settings, allow the Ghost hostname and enable the full app embed. The publication mode on the R7 connection still controls the published article. The script option controls the discussion inside Ghost.
+For Ghost-authored articles published to Discourse, the theme can use `data-discussion-bridge-ghost-mode="interactive"` on the script tag. In Discourse's Embedding settings, allow the Ghost hostname for Full and Interactive and enable the full app embed for Interactive.
 
 Ghost keeps only the discussion link in new outbound publications. The loader verifies the current Ghost article and gets live replies from Discourse. Outbound live replies require the connection's saved Ghost outbound credential to verify the public article by native ID. When that credential is unavailable, the article retains its discussion link. An earlier connector may have stored replies in the Ghost HTML. If any of those articles are still served, have an authorized operator remove the old reply bodies from Ghost before relying on this loader for moderation.
 
-To choose where the comments appear, put `<div data-discussion-bridge-ghost-comments></div>` in the Ghost theme or article. The loader otherwise uses the existing Simple comments section when present, or adds a section to the article.
+To choose where the comments appear, put `<div data-discussion-bridge-ghost-comments></div>` in the Ghost theme or article. The loader uses a published article's saved discussion section when present, or adds a section to the article.

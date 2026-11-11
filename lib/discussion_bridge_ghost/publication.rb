@@ -12,13 +12,14 @@ module DiscussionBridgeGhost
     # Retain the original namespace so an existing post keeps its ownership record.
     STORE = "discussionbridge-ghost-r7-post"
     RECOVERY_HISTORY = "#{STORE}-recovery-history"
+    PRESENTATION_MODES = %w[simple full interactive].freeze
 
     def self.validate_policy!(descriptor)
       policy = descriptor.fetch("policy")
       unless descriptor.fetch("directions").include?("from_discourse") && policy.fetch("enabled") &&
-             policy.fetch("presentation_mode") == "simple" && policy.fetch("author_ids").empty? &&
+             PRESENTATION_MODES.include?(policy.fetch("presentation_mode")) && policy.fetch("author_ids").empty? &&
              policy.fetch("taxonomy_ids").empty? && descriptor.dig("native_capabilities", "complete_content_supported")
-        raise Error.new("ghost_simple_publish_policy_required")
+        raise Error.new("ghost_publish_policy_unsupported")
       end
     end
 
@@ -184,7 +185,8 @@ module DiscussionBridgeGhost
       end
 
       unless item.fetch("source_id") == @source_id && item.fetch("canonical_url") == @state.fetch("url") &&
-             item.fetch("external_id") == @state.fetch("external_id") && item.fetch("presentation_mode") == "simple" &&
+             item.fetch("external_id") == @state.fetch("external_id") &&
+             PRESENTATION_MODES.include?(item.fetch("presentation_mode")) &&
              (!item["destination_native_id"] || item["destination_native_id"] == @state["native_id"])
         raise Error.new("native_ownership_conflict")
       end
