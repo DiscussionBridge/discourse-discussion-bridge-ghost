@@ -1,6 +1,21 @@
-# DiscussionBridge for Ghost
+# DiscussionBridge Ghost connector
 
-Development baseline for a Discourse-hosted Ghost connector. The connector is built against R7 contract `09d77c0209835c2d996aad294d161f167c7bd838` and receiver `685eb3c6be54b8ef41b68949867b884703e2768e`.
+The Ghost connector runs inside Discourse alongside
+[DiscussionBridge for Discourse](https://github.com/DiscussionBridge/discourse-discussion-bridge). It publishes eligible Discourse
+topics to Ghost posts or pages, imports tagged Ghost articles into Discourse,
+and provides a comments loader for Ghost themes.
+
+**V4 Alpha source:** [`v0.4.0-alpha.1.ghost.3`](https://github.com/DiscussionBridge/discourse-discussion-bridge-ghost/tree/v0.4.0-alpha.1.ghost.3) · [GitHub Actions](https://github.com/DiscussionBridge/discourse-discussion-bridge-ghost/actions/runs/43107194478)
+
+Use the exact connector tag and an R7 receiver. The original connector
+compatibility checks used receiver commit
+[`685eb3c`](https://github.com/DiscussionBridge/discourse-discussion-bridge/commit/685eb3c6be54b8ef41b68949867b884703e2768e)
+and the [V4 R7 contract](https://github.com/DiscussionBridge/discussionbridge-adapter-contract/tree/09d77c0209835c2d996aad294d161f167c7bd838). After installing the plugins, start with
+publishing paused and configure the Ghost tab using the
+[automatic publishing instructions](#automatic-publishing). The console
+commands below are available for diagnostics and manual operations.
+
+For the separately hosted integration, see the [Ghost adapter](https://github.com/DiscussionBridge/ghost-discussion-bridge).
 
 ## Connection check
 
