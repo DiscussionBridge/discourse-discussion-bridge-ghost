@@ -7,13 +7,14 @@ require "uri"
 
 module DiscussionBridgeGhost
   class PostPresentation
-    def self.render(source, article, owner:, resource:, native_id:)
+    def self.render(source, article, forum_name:, owner:, resource:, native_id:)
       topic = Topic.find(source.fetch("topic_id"))
       guardian = Guardian.new
       raise Error.new("source_ineligible") unless guardian.can_see_topic?(topic)
 
       link = CGI.escapeHTML(source.fetch("topic_url"))
       title = CGI.escapeHTML(source.fetch("title"))
+      forum = CGI.escapeHTML(forum_name)
       revision = CGI.escapeHTML(source.fetch("source_revision"))
       first = Post.find_by(topic_id: topic.id, post_number: 1)
       author = first&.user if first && guardian.can_see_post?(first)
@@ -32,7 +33,7 @@ module DiscussionBridgeGhost
       <<~HTML.chomp
         <section data-db-owner="#{owner}" data-db-resource="#{resource}" data-db-native="#{native_id}" data-db-revision="#{revision}">
         <div data-db-article="true">#{article}</div>
-        <aside class="discussionbridge-publication">#{byline}<p>Originally published as <a data-db-source-title="true" href="#{link}">#{title}</a>.</p></aside>
+        <aside class="discussionbridge-publication">#{byline}<p>Originally published as <a data-db-source-title="true" href="#{link}">#{title}</a> on #{forum}.</p></aside>
         <section data-db-mode="simple"><a data-db-discussion="true" href="#{link}">Open discussion</a></section>
         </section>
       HTML

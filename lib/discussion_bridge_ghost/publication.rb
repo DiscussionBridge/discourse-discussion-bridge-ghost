@@ -462,7 +462,8 @@ module DiscussionBridgeGhost
       article = native_article
       unless operation["html"]
         operation["html"] = PostPresentation.render(
-          @source, source_html, owner: @state.fetch("owner"), resource: @mapping.fetch("resource_id"), native_id: article.fetch("id"),
+          @source, source_html, forum_name: @descriptor.fetch("forum_name"), owner: @state.fetch("owner"),
+          resource: @mapping.fetch("resource_id"), native_id: article.fetch("id"),
         )
         operation["source_url"] = @source.fetch("topic_url")
         operation["title"] = @source.fetch("title")
