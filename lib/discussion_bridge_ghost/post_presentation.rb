@@ -67,12 +67,13 @@ module DiscussionBridgeGhost
         end
     end
 
-    def self.digest(html, owner:, source_url:, ghost_url:)
+    def self.digest(html, owner:, source_url:, ghost_url:, native_html: nil)
       raise Error.new("public_verification_failed") unless html.is_a?(String) && html.valid_encoding?
       matches = Nokogiri::HTML5.fragment(html).css("section[data-db-owner]").select { |node| node["data-db-owner"] == owner }
       raise Error.new("public_verification_failed") unless matches.one?
 
       fragment = matches.first
+      restore_native_article_links!(fragment, native_html, owner, ghost_url) if native_html
       links = fragment.css("a[data-db-discussion]")
       raise Error.new("public_verification_failed") unless links.one?
 
@@ -104,5 +105,35 @@ module DiscussionBridgeGhost
       end
       Digest::SHA256.hexdigest(fragment.to_html)
     end
+
+    def self.restore_native_article_links!(public_fragment, native_html, owner, ghost_url)
+      native = Nokogiri::HTML5.fragment(native_html).css("section[data-db-owner]").select { |node| node["data-db-owner"] == owner }
+      raise Error.new("public_verification_failed") unless native.one?
+
+      expected = native.first.css("[data-db-article] a")
+      actual = public_fragment.css("[data-db-article] a")
+      raise Error.new("public_verification_failed") unless expected.size == actual.size
+
+      host = URI.parse(ghost_url).hostname
+      referral = URI.encode_www_form_component(host)
+      expected.zip(actual).each do |original, rendered|
+        href = original["href"]
+        next if rendered["href"] == href || !href&.match?(%r{\Ahttps?://}i)
+
+        uri = URI.parse(href)
+        next if !uri.hostname || uri.hostname == host
+
+        base, fragment = href.split("#", 2)
+        separator = uri.query.nil? ? "?" : "&"
+        rewritten = "#{base}#{separator}ref=#{referral}"
+        rewritten = "#{rewritten}##{fragment}" if fragment
+        # Match this exact native link by position and target. The fragment
+        # digest still checks every other attribute and all article content.
+        rendered["href"] = href if rendered["href"] == rewritten
+      rescue URI::InvalidURIError
+        raise Error.new("public_verification_failed")
+      end
+    end
+    private_class_method :restore_native_article_links!
   end
 end

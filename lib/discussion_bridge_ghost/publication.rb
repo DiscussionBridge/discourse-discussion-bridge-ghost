@@ -547,7 +547,7 @@ module DiscussionBridgeGhost
     end
 
     def reconcile_scoped_publication!(operation, expected, scope)
-      unless operation["publish_started"] && operation["supervised_dispatch"] == scope
+      unless matching_scoped_dispatch?(operation, scope) || recovered_scoped_dispatch?(scope)
         raise Error.new("native_restore_required")
       end
 
@@ -561,6 +561,22 @@ module DiscussionBridgeGhost
         remember_publication!(operation, article, expected)
         synchronize(operation)
       end
+    end
+
+    def matching_scoped_dispatch?(operation, scope)
+      operation["publish_started"] && operation["supervised_dispatch"] == scope
+    end
+
+    def recovered_scoped_dispatch?(scope)
+      prior_id = @current_work.retry_of_work_id
+      return false unless prior_id
+
+      prior = @current_work.cms_mapping.work_items.find_by(id: prior_id)
+      return false unless prior&.state == "superseded" && prior.action == @action && prior.source_revision == @revision
+
+      dispatch = PluginStore.get(RECOVERY_HISTORY, "#{@key}:#{prior.work_id}")
+      dispatch && recorded_work_id(dispatch) == prior.work_id &&
+        dispatch["revision"] == @revision && matching_scoped_dispatch?(dispatch, scope)
     end
 
     def remember_reconciled_dispatch!(operation, work, article, digest)
@@ -691,13 +707,15 @@ module DiscussionBridgeGhost
         fragment_digest(article.fetch("html")) == digest
     end
 
-    def fragment_digest(html, source_url: @source.fetch("topic_url"))
-      PostPresentation.digest(html, owner: @state.fetch("owner"), source_url: source_url, ghost_url: @state.fetch("url"))
+    def fragment_digest(html, source_url: @source.fetch("topic_url"), native_html: nil)
+      PostPresentation.digest(html, owner: @state.fetch("owner"), source_url: source_url, ghost_url: @state.fetch("url"), native_html: native_html)
     end
 
-    def public_proof!(digest)
+    def public_proof!(digest, article: @ghost.article(@kind, @state.fetch("native_id")))
+      raise Error.new("public_verification_failed") unless target_article?(article, digest)
+
       status, body = @ghost.public_article(@state.fetch("url"))
-      unless status == 200 && fragment_digest(body) == digest
+      unless status == 200 && fragment_digest(body, native_html: article.fetch("html")) == digest
         raise Error.new("public_verification_failed", status: status)
       end
     end
@@ -877,7 +895,7 @@ module DiscussionBridgeGhost
       raise Error.new("native_ownership_conflict") unless verified.fetch("revision") == @revision
       digest = verified.fetch("digest")
       raise Error.new("native_ownership_conflict") unless target_article?(article, digest)
-      public_proof!(digest)
+      public_proof!(digest, article: article)
     end
 
     def receiver(route)

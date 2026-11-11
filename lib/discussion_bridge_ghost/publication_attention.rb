@@ -133,12 +133,12 @@ module DiscussionBridgeGhost
         "object_exists" => true, "native_id" => article.fetch("id"), "native_revision" => article.fetch("updated_at"),
         "ownership" => receipt.slice("resource_id", "external_id", "native_id", "canonical_url", "source_revision")
           .merge("ownership_receipt_sha256" => result.fetch("ownership_receipt_sha256")),
-        "native_result" => result, "verification" => attention_public_proof(result, revision, digest, source_url),
+        "native_result" => result, "verification" => attention_public_proof(result, revision, digest, source_url, article),
         "source_revision" => revision, "managed_content_sha256" => digest, "current_sha256" => digest,
       )
     end
 
-    def attention_public_proof(result, revision, digest, source_url)
+    def attention_public_proof(result, revision, digest, source_url, article)
       identity = { "native_id" => result.fetch("native_id"), "url" => @state.fetch("url") }
       if result.fetch("kind") == "withdraw"
         status = public_absence!
@@ -146,7 +146,7 @@ module DiscussionBridgeGhost
       end
 
       status, body = @ghost.public_article(@state.fetch("url"))
-      unless status == 200 && fragment_digest(body, source_url: source_url) == digest
+      unless status == 200 && fragment_digest(body, source_url: source_url, native_html: article.fetch("html")) == digest
         raise Error.new("public_verification_failed", status: status)
       end
 
