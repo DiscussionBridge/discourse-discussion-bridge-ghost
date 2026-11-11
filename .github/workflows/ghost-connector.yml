@@ -1,0 +1,39 @@
+name: Ghost connector
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Use the same Ruby runtime image as the DiscussionBridge receiver CI.
+    container: discourse/discourse_test@sha256:5df460f3592a1adacc924775b6c690191572d8efe9e51d3f823c38c092d9f6a3
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Install Minitest
+        run: gem install --user-install --no-document minitest --version 6.0.6
+      - name: Run connector Ruby tests
+        run: |
+          git ls-files -z -- '*.rb' | xargs -0 -n 1 ruby -c
+          for suite in test/*_test.rb; do
+            ruby -e 'gem "minitest", "6.0.6"; load ARGV.shift' "$suite"
+          done
+      - name: Run public comments loader tests
+        run: |
+          node --check public/discussion-labels.js
+          node --test test/*_test.cjs
